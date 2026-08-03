@@ -36,13 +36,9 @@ COPY --from=build /app/build ./build
 # The schema and migrations are needed at runtime to apply pending migrations.
 COPY --from=build /app/prisma ./prisma
 
-# Writable location for the SQLite file when no external database is provided.
-RUN mkdir -p /app/data && chown -R node:node /app/data
-ENV DATABASE_URL="file:/app/data/prod.db"
-
 USER node
 EXPOSE 3000
 
-# Apply migrations before serving so a fresh volume gets a valid schema.
+# Apply migrations before serving.
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["sh", "-c", "npx prisma migrate deploy && npm run start"]
