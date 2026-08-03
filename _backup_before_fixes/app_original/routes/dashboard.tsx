@@ -1,0 +1,560 @@
+import { useOutletContext, Link, useLoaderData } from "react-router";
+import type { Route } from "./+types/dashboard";
+import { prisma } from "../lib/db.server";
+import { requireUserId } from "../lib/auth.server";
+import type { LayoutContextType } from "./layout";
+import { formatBDT, toBengaliDigits } from "../utils/bengali";
+import {
+  Wallet,
+  Receipt,
+  PiggyBank,
+  HeartHandshake,
+  Landmark,
+  Banknote,
+  AlertCircle,
+  TrendingDown,
+  TrendingUp,
+  ArrowUpRight,
+  ArrowRight,
+  CheckCircle2,
+} from "lucide-react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  CartesianGrid,
+} from "recharts";
+
+export async function loader({ request }: Route.LoaderArgs) {
+  const userId = await requireUserId(request);
+
+  const now = new Date();
+  const currentMonth = now.getMonth() + 1;
+  const currentYear = now.getFullYear();
+
+  // Start & End of Today
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
+  // Start & End of Current Month
+  const monthStart = new Date(currentYear, currentMonth - 1, 1);
+  const monthEnd = new Date(currentYear, currentMonth, 0, 23, 59, 59);
+
+  // 1. Current Month Incomes (Scoped to userId)
+  const incomes = await prisma.income.findMany({
+    where: { userId, month: currentMonth, year: currentYear },
+  });
+  const currentMonthIncome = incomes.reduce((sum, item) => sum + item.amount, 0);
+
+  // 2. Current Month Expenses (Scoped to userId)
+  const monthlyExpenses = await prisma.expense.findMany({
+    where: {
+      userId,
+      date: {
+        gte: monthStart,
+        lte: monthEnd,
+      },
+    },
+    include: { category: true, bankAccount: true },
+  });
+  const currentMonthExpense = monthlyExpenses.reduce((sum, item) => sum + item.amount, 0);
+
+  // 3. Today's Expense (Scoped to userId)
+  const todayExpenses = await prisma.expense.findMany({
+    where: {
+      userId,
+      date: {
+        gte: todayStart,
+        lte: todayEnd,
+      },
+    },
+  });
+  const todayExpenseTotal = todayExpenses.reduce((sum, item) => sum + item.amount, 0);
+
+  // 4. Bank Accounts & Cash Balances (Scoped to userId)
+  const bankAccounts = await prisma.bankAccount.findMany({ where: { userId } });
+  const totalBankBalance = bankAccounts
+    .filter((b) => b.bankName !== "Cash")
+    .reduce((sum, b) => sum + b.currentBalance, 0);
+
+  const cashAccount = bankAccounts.find((b) => b.bankName === "Cash");
+  const cashBalance = cashAccount ? cashAccount.currentBalance : 0;
+
+  // 5. 1% Donations Status (Scoped to userId via income relation)
+  const donations = await prisma.donation.findMany({
+    where: { income: { userId } },
+  });
+  const totalDonationAmount = donations.reduce((sum, d) => sum + d.amount, 0);
+  const pendingDonationAmount = donations
+    .filter((d) => !d.paid)
+    .reduce((sum, d) => sum + d.amount, 0);
+
+  // 6. Pending Monthly Bills (Scoped to userId)
+  const pendingBills = await prisma.bill.findMany({
+    where: { userId, paid: false },
+    orderBy: { dueDate: "asc" },
+  });
+  const totalPendingBillsAmount = pendingBills.reduce((sum, b) => sum + b.amount, 0);
+
+  // 7. Recent 5 Expenses (Scoped to userId)
+  const recentExpenses = await prisma.expense.findMany({
+    where: { userId },
+    take: 5,
+    orderBy: { date: "desc" },
+    include: { category: true, bankAccount: true },
+  });
+
+  // 8. Category Breakdown for Chart
+  const categoryMap: { [key: string]: { name: string; amount: number; color: string } } = {};
+  monthlyExpenses.forEach((exp) => {
+    const catName = exp.category.name;
+    const catColor = exp.category.color || "#10b981";
+    if (!categoryMap[catName]) {
+      categoryMap[catName] = { name: catName, amount: 0, color: catColor };
+    }
+    categoryMap[catName].amount += exp.amount;
+  });
+  const categoryChartData = Object.values(categoryMap).sort((a, b) => b.amount - a.amount);
+
+  // 9. Monthly Income vs Expense Chart (Last 6 Months)
+  const last6MonthsData = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(currentYear, currentMonth - 1 - i, 1);
+    const m = d.getMonth() + 1;
+    const y = d.getFullYear();
+    const mStart = new Date(y, m - 1, 1);
+    const mEnd = new Date(y, m, 0, 23, 59, 59);
+
+    const mIncomes = await prisma.income.findMany({
+      where: { userId, month: m, year: y },
+    });
+    const incSum = mIncomes.reduce((s, item) => s + item.amount, 0);
+
+    const mExps = await prisma.expense.findMany({
+      where: { userId, date: { gte: mStart, lte: mEnd } },
+    });
+    const expSum = mExps.reduce((s, item) => s + item.amount, 0);
+
+    const monthNames = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+
+    last6MonthsData.push({
+      month: monthNames[m - 1],
+      আয়: incSum,
+      খরচ: expSum,
+    });
+  }
+
+  return {
+    currentMonthIncome,
+    currentMonthExpense,
+    remainingSavings: currentMonthIncome - currentMonthExpense,
+    todayExpenseTotal,
+    totalBankBalance,
+    cashBalance,
+    totalDonationAmount,
+    pendingDonationAmount,
+    pendingBills,
+    totalPendingBillsAmount,
+    recentExpenses,
+    categoryChartData,
+    last6MonthsData,
+  };
+}
+
+export default function Dashboard() {
+  const { useBengaliDigits } = useOutletContext<LayoutContextType>();
+  const data = useLoaderData<typeof loader>();
+
+  return (
+    <div className="space-y-8 pb-12">
+      {/* Overview Metric Cards Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        {/* Card 1: Total Income */}
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between relative overflow-hidden group">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              চলতি মাসের আয়
+            </span>
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+              <Wallet className="w-5 h-5" />
+            </div>
+          </div>
+          <div className="mt-4">
+            <div className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight">
+              {formatBDT(data.currentMonthIncome, useBengaliDigits)}
+            </div>
+            <p className="text-xs text-emerald-400 mt-1 flex items-center gap-1">
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>মাসিক আয় সমাহার</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Card 2: Total Expense */}
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between relative overflow-hidden group">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              চলতি মাসের খরচ
+            </span>
+            <div className="w-10 h-10 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center">
+              <Receipt className="w-5 h-5" />
+            </div>
+          </div>
+          <div className="mt-4">
+            <div className="text-2xl sm:text-3xl font-extrabold text-rose-400 tracking-tight">
+              {formatBDT(data.currentMonthExpense, useBengaliDigits)}
+            </div>
+            <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+              <span>আজকের খরচ:</span>
+              <strong className="text-slate-200">
+                {formatBDT(data.todayExpenseTotal, useBengaliDigits)}
+              </strong>
+            </p>
+          </div>
+        </div>
+
+        {/* Card 3: Remaining Balance / Savings */}
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between relative overflow-hidden group">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              অবশিষ্ট আয় / সঞ্চয়
+            </span>
+            <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center">
+              <PiggyBank className="w-5 h-5" />
+            </div>
+          </div>
+          <div className="mt-4">
+            <div
+              className={`text-2xl sm:text-3xl font-extrabold tracking-tight ${
+                data.remainingSavings >= 0 ? "text-sky-400" : "text-amber-400"
+              }`}
+            >
+              {formatBDT(data.remainingSavings, useBengaliDigits)}
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              আয় থেকে খরচ বাদ দিয়ে অবশিষ্ট
+            </p>
+          </div>
+        </div>
+
+        {/* Card 4: 1% Donation */}
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between relative overflow-hidden group">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              ১% দান (Donation)
+            </span>
+            <div className="w-10 h-10 rounded-xl bg-teal-500/10 text-teal-400 flex items-center justify-center">
+              <HeartHandshake className="w-5 h-5" />
+            </div>
+          </div>
+          <div className="mt-4">
+            <div className="text-2xl sm:text-3xl font-extrabold text-teal-400 tracking-tight">
+              {formatBDT(data.totalDonationAmount, useBengaliDigits)}
+            </div>
+            <p className="text-xs text-amber-400 mt-1">
+              বকেয়া দান: {formatBDT(data.pendingDonationAmount, useBengaliDigits)}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Secondary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center">
+              <Landmark className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">মোট ব্যাংক ব্যালেন্স</p>
+              <h3 className="text-xl font-bold text-slate-100">
+                {formatBDT(data.totalBankBalance, useBengaliDigits)}
+              </h3>
+            </div>
+          </div>
+          <Link
+            to="/bank-accounts"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition"
+          >
+            <ArrowUpRight className="w-5 h-5" />
+          </Link>
+        </div>
+
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center">
+              <Banknote className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">নগদ টাকা (Wallet)</p>
+              <h3 className="text-xl font-bold text-slate-100">
+                {formatBDT(data.cashBalance, useBengaliDigits)}
+              </h3>
+            </div>
+          </div>
+          <Link
+            to="/bank-accounts"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition"
+          >
+            <ArrowUpRight className="w-5 h-5" />
+          </Link>
+        </div>
+
+        <div className="glass-card p-5 rounded-2xl border border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">বকেয়া মাসিক বিল ({useBengaliDigits ? toBengaliDigits(data.pendingBills.length) : data.pendingBills.length}টি)</p>
+              <h3 className="text-xl font-bold text-rose-400">
+                {formatBDT(data.totalPendingBillsAmount, useBengaliDigits)}
+              </h3>
+            </div>
+          </div>
+          <Link
+            to="/bills"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition"
+          >
+            <ArrowUpRight className="w-5 h-5" />
+          </Link>
+        </div>
+      </div>
+
+      {/* Analytics Charts Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Income vs Expense Bar Chart */}
+        <div className="glass-card p-6 rounded-2xl border border-slate-800 lg:col-span-2">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="font-bold text-slate-100 text-lg">
+                আয় ও খরচ ট্রেন্ড (বিগত ৬ মাস)
+              </h3>
+              <p className="text-xs text-slate-400">
+                মাসিক মোট আয় এবং খরচের তুলনামূলক চিত্র
+              </p>
+            </div>
+          </div>
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.last6MonthsData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="month" stroke="#64748b" />
+                <YAxis stroke="#64748b" />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: "#0f172a",
+                    borderColor: "#334155",
+                    borderRadius: "12px",
+                    color: "#f8fafc",
+                  }}
+                />
+                <Bar dataKey="আয়" fill="#10b981" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="খরচ" fill="#f43f5e" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Category Expense Pie Chart */}
+        <div className="glass-card p-6 rounded-2xl border border-slate-800">
+          <div className="mb-4">
+            <h3 className="font-bold text-slate-100 text-lg">
+              খাতভিত্তিক খরচ
+            </h3>
+            <p className="text-xs text-slate-400">
+              চলতি মাসের খরচের ক্যাটাগরি ডিস্ট্রিবিউশন
+            </p>
+          </div>
+          {data.categoryChartData.length > 0 ? (
+            <div className="h-60 w-full relative">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={data.categoryChartData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={55}
+                    outerRadius={80}
+                    paddingAngle={4}
+                    dataKey="amount"
+                  >
+                    {data.categoryChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    formatter={(value: any) => formatBDT(Number(value), useBengaliDigits)}
+                    contentStyle={{
+                      backgroundColor: "#0f172a",
+                      borderColor: "#334155",
+                      borderRadius: "12px",
+                      color: "#f8fafc",
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-60 flex items-center justify-center text-slate-500 text-sm">
+              এই মাসে এখনও কোনো খরচের ডেটা নেই
+            </div>
+          )}
+
+          {/* Top 3 categories legend */}
+          <div className="space-y-2 mt-2">
+            {data.categoryChartData.slice(0, 3).map((cat, idx) => (
+              <div key={idx} className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="w-2.5 h-2.5 rounded-full"
+                    style={{ backgroundColor: cat.color }}
+                  />
+                  <span className="text-slate-300 truncate max-w-[120px]">
+                    {cat.name}
+                  </span>
+                </div>
+                <span className="font-semibold text-slate-200">
+                  {formatBDT(cat.amount, useBengaliDigits)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Expenses Table & Pending Bills Sidebar */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Recent Expenses */}
+        <div className="glass-card p-6 rounded-2xl border border-slate-800 lg:col-span-2 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-bold text-slate-100 text-lg">
+                সাম্প্রতিক খরচসমূহ
+              </h3>
+              <p className="text-xs text-slate-400">সর্বশেষ ৫টি দৈনিক খরচের এন্ট্রি</p>
+            </div>
+            <Link
+              to="/expenses"
+              className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
+            >
+              <span>সকল খরচ দেখুন</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-xs text-slate-400 uppercase tracking-wider">
+                  <th className="py-3 px-2">বিবরণ</th>
+                  <th className="py-3 px-2">ক্যাটাগরি</th>
+                  <th className="py-3 px-2">পেমেন্ট</th>
+                  <th className="py-3 px-2 text-right">পরিমাণ</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {data.recentExpenses.map((exp) => (
+                  <tr key={exp.id} className="hover:bg-slate-800/40 transition">
+                    <td className="py-3 px-2">
+                      <div className="font-medium text-slate-200">{exp.title}</div>
+                      <div className="text-[11px] text-slate-400">
+                        {new Date(exp.date).toLocaleDateString()}
+                      </div>
+                    </td>
+                    <td className="py-3 px-2">
+                      <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 text-xs border border-slate-700">
+                        {exp.category.name}
+                      </span>
+                    </td>
+                    <td className="py-3 px-2 text-xs text-slate-400">
+                      {exp.paymentMethod}{" "}
+                      {exp.bankAccount ? `(${exp.bankAccount.bankName})` : ""}
+                    </td>
+                    <td className="py-3 px-2 text-right font-bold text-rose-400">
+                      {formatBDT(exp.amount, useBengaliDigits)}
+                    </td>
+                  </tr>
+                ))}
+                {data.recentExpenses.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="py-6 text-center text-slate-500 text-xs">
+                      কোনো খরচের এন্ট্রি পাওয়া যায়নি
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Pending Bills List */}
+        <div className="glass-card p-6 rounded-2xl border border-slate-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-bold text-slate-100 text-lg">
+              বকেয়া ইউটিলিটি বিল
+            </h3>
+            <Link
+              to="/bills"
+              className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold"
+            >
+              ম্যানেজ করুন
+            </Link>
+          </div>
+
+          <div className="space-y-3">
+            {data.pendingBills.map((bill) => (
+              <div
+                key={bill.id}
+                className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center justify-between"
+              >
+                <div>
+                  <h4 className="font-semibold text-slate-200 text-sm">
+                    {bill.title}
+                  </h4>
+                  <p className="text-xs text-rose-400 mt-0.5">
+                    শেষ তারিখ: {new Date(bill.dueDate).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className="font-bold text-slate-100 text-sm">
+                    {formatBDT(bill.amount, useBengaliDigits)}
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 font-medium">
+                    অপরিশোধিত
+                  </span>
+                </div>
+              </div>
+            ))}
+
+            {data.pendingBills.length === 0 && (
+              <div className="p-6 text-center text-slate-400 text-xs flex flex-col items-center gap-2">
+                <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+                <span>সব ইউটিলিটি বিল পরিশোধ করা হয়েছে!</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

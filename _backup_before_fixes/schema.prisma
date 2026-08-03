@@ -1,0 +1,104 @@
+// Prisma schema file for Multi-User Personal Family Finance Manager
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(uuid())
+  name         String
+  email        String        @unique
+  password     String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  incomes      Income[]
+  bankAccounts BankAccount[]
+  categories   Category[]
+  expenses     Expense[]
+  bills        Bill[]
+}
+
+model Income {
+  id        String     @id @default(uuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  amount    Float
+  month     Int
+  year      Int
+  note      String?
+  createdAt DateTime   @default(now())
+  donations Donation[]
+}
+
+model Donation {
+  id            String       @id @default(uuid())
+  incomeId      String
+  income        Income       @relation(fields: [incomeId], references: [id], onDelete: Cascade)
+  percentage    Float        @default(1.0)
+  amount        Float
+  paid          Boolean      @default(false)
+  paidDate      DateTime?
+  bankAccountId String?
+  bankAccount   BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+}
+
+model BankAccount {
+  id             String     @id @default(uuid())
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankName       String
+  accountName    String
+  accountNumber  String
+  currentBalance Float      @default(0.0)
+  note           String?
+  createdAt      DateTime   @default(now())
+  expenses       Expense[]
+  donations      Donation[]
+}
+
+model Category {
+  id        String    @id @default(uuid())
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  icon      String?
+  color     String?
+  type      String    @default("EXPENSE")
+  expenses  Expense[]
+}
+
+model Expense {
+  id            String       @id @default(uuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date          DateTime     @default(now())
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id])
+  title         String
+  amount        Float
+  paymentMethod String // Cash, Bank, bKash, Nagad, Rocket
+  bankAccountId String?
+  bankAccount   BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  note          String?
+  createdAt     DateTime     @default(now())
+}
+
+model Bill {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  amount    Float
+  dueDate   DateTime
+  paid      Boolean   @default(false)
+  paidDate  DateTime?
+  note      String?
+  createdAt DateTime  @default(now())
+}

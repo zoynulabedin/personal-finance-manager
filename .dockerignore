@@ -1,0 +1,27 @@
+# Secrets and local databases must never enter an image layer.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+prisma/*.db
+prisma/*.db-journal
+
+# VCS and local tooling
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+
+# Build output and caches
+.react-router
+build
+node_modules
+npm-debug.log*
+
+# Docs
+README.md
+agent.md
+BUG_REPORT.md

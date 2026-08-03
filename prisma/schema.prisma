@@ -1,0 +1,189 @@
+// Prisma schema file for Multi-User Personal Family Finance Manager
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Bumped whenever the password changes. Sessions carry the version they were
+  // issued with, so a password change invalidates every other device.
+  sessionVersion Int @default(0)
+
+  incomes      Income[]
+  bankAccounts BankAccount[]
+  categories   Category[]
+  expenses     Expense[]
+  bills        Bill[]
+  ledgerEntries LedgerEntry[]
+}
+
+model Income {
+  id        String     @id @default(uuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  amount    Float
+  month     Int
+  year      Int
+  note      String?
+  createdAt DateTime   @default(now())
+  donations Donation[]
+
+  /// Which account the money landed in, and when. Income now credits that
+  /// account instead of leaving the user to retype the balance by hand.
+  bankAccountId String?
+  bankAccount   BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  receivedAt    DateTime     @default(now())
+
+  @@index([userId, year, month])
+  @@index([userId, createdAt])
+}
+
+model Donation {
+  id            String       @id @default(uuid())
+  incomeId      String
+  income        Income       @relation(fields: [incomeId], references: [id], onDelete: Cascade)
+  percentage    Float        @default(1.0)
+  amount        Float
+  paid          Boolean      @default(false)
+  paidDate      DateTime?
+  bankAccountId String?
+  bankAccount   BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+
+  @@index([incomeId])
+  @@index([bankAccountId])
+  @@index([paid])
+}
+
+model BankAccount {
+  id             String     @id @default(uuid())
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankName       String
+  accountName    String
+  accountNumber  String
+  currentBalance Float      @default(0.0)
+  // Explicit flag instead of matching on bankName == "Cash", so the dashboard
+  // can split cash from bank reliably and support more than one cash wallet.
+  isCash         Boolean    @default(false)
+  note           String?
+  createdAt      DateTime   @default(now())
+  expenses       Expense[]
+  donations      Donation[]
+  incomes        Income[]
+  ledgerEntries  LedgerEntry[]
+
+  @@index([userId])
+}
+
+model Category {
+  id       String    @id @default(uuid())
+  userId   String?
+  user     User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name     String
+  icon     String?
+  color    String?
+  type     String    @default("EXPENSE")
+  expenses Expense[]
+
+  @@index([userId])
+}
+
+model Expense {
+  id            String       @id @default(uuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date          DateTime     @default(now())
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  title         String
+  amount        Float
+  paymentMethod String // Cash, Bank, bKash, Nagad, Rocket
+  bankAccountId String?
+  bankAccount   BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  note           String?
+  createdAt      DateTime    @default(now())
+  ledgerEntries  LedgerEntry[]
+  // Set when this expense was created by marking a bill paid.
+  bill           Bill?
+
+  @@index([userId, date])
+  @@index([userId, categoryId])
+  @@index([bankAccountId])
+}
+
+model Bill {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  amount    Float
+  dueDate   DateTime
+  paid      Boolean   @default(false)
+  paidDate  DateTime?
+  note      String?
+  createdAt DateTime  @default(now())
+
+  // A paid bill *is* an expense. Marking it paid creates one and links it here,
+  // so the money movement is recorded once rather than in two parallel places.
+  expenseId String?  @unique
+  expense   Expense? @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+
+  @@index([userId, dueDate])
+  @@index([userId, paid])
+}
+
+/// Append-only record of every movement of money.
+///
+/// `BankAccount.currentBalance` is a cache of `sum(amount)` over these rows.
+/// Both are written together inside one transaction by `postLedgerEntry` in
+/// `app/lib/ledger.server.ts`, which is the only code permitted to change a
+/// balance. Nothing is ever edited or deleted here: a correction posts an
+/// opposite entry and marks the original reversed, so the history of how a
+/// balance came to be is always reconstructable.
+model LedgerEntry {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankAccountId String
+  bankAccount   BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Cascade)
+
+  /// Signed: positive credits the account, negative debits it.
+  amount      Float
+  /// OPENING | INCOME | EXPENSE | DONATION | ADJUSTMENT
+  type        String
+  description String
+  occurredAt  DateTime    @default(now())
+
+  /// What caused this entry. All nullable — an ADJUSTMENT has no source.
+  incomeId   String?
+  expenseId  String?
+  expense    Expense?  @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+  donationId String?
+
+  /// Set on the original when a reversal is posted against it.
+  reversedAt   DateTime?
+  /// Set on the reversal, pointing back at what it undid.
+  reversalOfId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, occurredAt])
+  @@index([bankAccountId, occurredAt])
+  @@index([incomeId])
+  @@index([expenseId])
+  @@index([donationId])
+}
