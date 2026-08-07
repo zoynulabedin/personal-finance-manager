@@ -27,6 +27,7 @@ model User {
   expenses     Expense[]
   bills        Bill[]
   ledgerEntries LedgerEntry[]
+  transfers    Transfer[]
 }
 
 model Income {
@@ -85,6 +86,8 @@ model BankAccount {
   donations      Donation[]
   incomes        Income[]
   ledgerEntries  LedgerEntry[]
+  transfersFrom  Transfer[] @relation("TransferFrom")
+  transfersTo    Transfer[] @relation("TransferTo")
 
   @@index([userId])
 }
