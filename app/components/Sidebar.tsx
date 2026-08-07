@@ -1,4 +1,4 @@
-﻿import { Link, useLocation } from "react-router";
+import { Link, useLocation } from "react-router";
 import {
   LayoutDashboard,
   Wallet,
@@ -26,16 +26,17 @@ export function Sidebar({ user, isOpen, onClose }: SidebarProps) {
   const location = useLocation();
 
   const navItems = [
-    { label: "à¦¡à§à¦¯à¦¾à¦¶à¦¬à§‹à¦°à§à¦¡", path: "/", icon: LayoutDashboard },
-    { label: "à¦†à§Ÿ (Income)", path: "/income", icon: Wallet },
-    { label: "à¦¦à§ˆà¦¨à¦¨à§à¦¦à¦¿à¦¨ à¦–à¦°à¦š", path: "/expenses", icon: Receipt },
-    { label: "à¦®à¦¾à¦¸à¦¿à¦• à¦¬à¦¿à¦²", path: "/bills", icon: CreditCard },
-    { label: "à§§% à¦¦à¦¾à¦¨ (Donation)", path: "/donations", icon: HeartHandshake },
-    { label: "à¦¬à§à¦¯à¦¾à¦‚à¦• à¦“ à¦“à§Ÿà¦¾à¦²à§‡à¦Ÿ", path: "/bank-accounts", icon: Landmark },
-    { label: "à¦²à§‡à¦¨à¦¦à§‡à¦¨à§‡à¦° à¦–à¦¤à¦¿à¦¯à¦¼à¦¾à¦¨", path: "/transactions", icon: ScrollText },
-    { label: "à¦•à§à¦¯à¦¾à¦Ÿà¦¾à¦—à¦°à¦¿", path: "/categories", icon: Tags },
-    { label: "à¦°à¦¿à¦ªà§‹à¦°à§à¦Ÿ à¦“ à¦…à§à¦¯à¦¾à¦¨à¦¾à¦²à¦¿à¦Ÿà¦¿à¦•à§à¦¸", path: "/reports", icon: BarChart3 },
-    { label: "à¦¸à§‡à¦Ÿà¦¿à¦‚à¦¸", path: "/settings", icon: Settings },
+    { label: "ড্যাশবোর্ড", path: "/", icon: LayoutDashboard },
+    { label: "আয় (Income)", path: "/income", icon: Wallet },
+    { label: "দৈনন্দিন খরচ", path: "/expenses", icon: Receipt },
+    { label: "মাসিক বিল", path: "/bills", icon: CreditCard },
+    { label: "১% দান (Donation)", path: "/donations", icon: HeartHandshake },
+    { label: "ব্যাংক ও ওয়ালেট", path: "/bank-accounts", icon: Landmark },
+    { label: "অ্যাকাউন্ট ট্রান্সফার", path: "/transfers", icon: ArrowRightLeft },
+    { label: "লেনদেনের খতিয়ান", path: "/transactions", icon: ScrollText },
+    { label: "ক্যাটাগরি", path: "/categories", icon: Tags },
+    { label: "রিপোর্ট ও অ্যানালিটিক্স", path: "/reports", icon: BarChart3 },
+    { label: "সেটিংস", path: "/settings", icon: Settings },
   ];
 
   return (
@@ -61,7 +62,7 @@ export function Sidebar({ user, isOpen, onClose }: SidebarProps) {
             </div>
             <div>
               <h1 className="font-bold text-slate-100 text-lg leading-tight tracking-tight">
-                à¦†à¦®à¦¾à¦° à¦¹à¦¿à¦¸à¦¾à¦¬
+                আমার হিসাব
               </h1>
               <span className="text-[11px] text-emerald-400 font-medium tracking-wide">
                 Poribar Finance
@@ -114,11 +115,11 @@ export function Sidebar({ user, isOpen, onClose }: SidebarProps) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 overflow-hidden">
               <div className="w-9 h-9 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-emerald-400 shrink-0">
-                {user?.name?.[0] || "à¦ª"}
+                {user?.name?.[0] || "প"}
               </div>
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-slate-200 truncate">
-                  {user?.name || "à¦ªà¦°à¦¿à¦¬à¦¾à¦° à¦ªà§à¦°à¦§à¦¾à¦¨"}
+                  {user?.name || "পরিবার প্রধান"}
                 </p>
                 <p className="text-xs text-slate-400 truncate">
                   {user?.email || "admin@family.com"}
@@ -129,7 +130,7 @@ export function Sidebar({ user, isOpen, onClose }: SidebarProps) {
             <form action="/logout" method="post">
               <button
                 type="submit"
-                title="à¦²à¦—à¦†à¦‰à¦Ÿ"
+                title="লগআউট"
                 className="p-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
               >
                 <LogOut className="w-4.5 h-4.5" />
@@ -141,4 +142,3 @@ export function Sidebar({ user, isOpen, onClose }: SidebarProps) {
     </>
   );
 }
-
