@@ -1,27 +1,14 @@
 import { useState } from "react";
 import { Form, useLoaderData, useOutletContext, useActionData, redirect } from "react-router";
 import type { Route } from "./+types/transfers";
-import { prisma } from "../lib/db.server";
-import { requireUserId } from "../lib/auth.server";
-import {
-  parseAmount,
-  parseDateInput,
-  parseOptionalText,
-  parseText,
-  roundMoney,
-} from "../lib/validation.server";
-import {
-  assertOwnedAccount,
-  credit,
-  debit,
-  reverseLedgerFor,
-} from "../lib/ledger.server";
 import { toDateInputValue, todayInputValue } from "../utils/date";
 import type { LayoutContextType } from "./layout";
 import { formatBDT, toBengaliDigits, formatBengaliDate } from "../utils/bengali";
 import { Plus, Trash2, Edit, ArrowRightLeft, X } from "lucide-react";
 
 export async function loader({ request }: Route.LoaderArgs) {
+  const { requireUserId } = await import("../lib/auth.server");
+  const { prisma } = await import("../lib/db.server");
   const userId = await requireUserId(request);
 
   const [transfers, bankAccounts] = await Promise.all([
@@ -43,6 +30,20 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export async function action({ request }: Route.ActionArgs) {
+  const { requireUserId } = await import("../lib/auth.server");
+  const { prisma } = await import("../lib/db.server");
+  const {
+    parseAmount,
+    parseDateInput,
+    parseOptionalText,
+  } = await import("../lib/validation.server");
+  const {
+    assertOwnedAccount,
+    credit,
+    debit,
+    reverseLedgerFor,
+  } = await import("../lib/ledger.server");
+
   const userId = await requireUserId(request);
   const formData = await request.formData();
   const intent = formData.get("_intent")?.toString();
