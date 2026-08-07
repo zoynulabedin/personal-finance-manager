@@ -173,6 +173,7 @@ model LedgerEntry {
   expenseId  String?
   expense    Expense?  @relation(fields: [expenseId], references: [id], onDelete: SetNull)
   donationId String?
+  transferId String?
 
   /// Set on the original when a reversal is posted against it.
   reversedAt   DateTime?
@@ -186,4 +187,26 @@ model LedgerEntry {
   @@index([incomeId])
   @@index([expenseId])
   @@index([donationId])
+  @@index([transferId])
+}
+
+model Transfer {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fromAccountId String
+  fromAccount   BankAccount @relation("TransferFrom", fields: [fromAccountId], references: [id], onDelete: Cascade)
+
+  toAccountId String
+  toAccount   BankAccount @relation("TransferTo", fields: [toAccountId], references: [id], onDelete: Cascade)
+
+  amount    Float
+  note      String?
+  occurredAt DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([userId, occurredAt])
+  @@index([fromAccountId])
+  @@index([toAccountId])
 }

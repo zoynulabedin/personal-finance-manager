@@ -27,6 +27,7 @@ const TYPE_LABELS: Record<string, string> = {
   EXPENSE: "খরচ",
   DONATION: "দান",
   ADJUSTMENT: "সমন্বয়",
+  TRANSFER: "ট্রান্সফার",
 };
 
 export async function loader({ request }: Route.LoaderArgs) {

@@ -19,13 +19,15 @@ export type LedgerType =
   | "INCOME"
   | "EXPENSE"
   | "DONATION"
-  | "ADJUSTMENT";
+  | "ADJUSTMENT"
+  | "TRANSFER";
 
 /** Identifies what caused an entry, so it can be found and reversed later. */
 export type LedgerSource = {
   incomeId?: string | null;
   expenseId?: string | null;
   donationId?: string | null;
+  transferId?: string | null;
 };
 
 type Tx = Prisma.TransactionClient;
@@ -63,6 +65,7 @@ export async function postLedgerEntry(
       incomeId: params.source?.incomeId ?? null,
       expenseId: params.source?.expenseId ?? null,
       donationId: params.source?.donationId ?? null,
+      transferId: params.source?.transferId ?? null,
       reversalOfId: params.reversalOfId ?? null,
     },
   });
@@ -117,6 +120,7 @@ export async function reverseLedgerFor(
   if (source.incomeId) filter.incomeId = source.incomeId;
   else if (source.expenseId) filter.expenseId = source.expenseId;
   else if (source.donationId) filter.donationId = source.donationId;
+  else if (source.transferId) filter.transferId = source.transferId;
   else return 0;
 
   // Only reverse originals; a reversal entry is itself final.
@@ -139,6 +143,7 @@ export async function reverseLedgerFor(
         incomeId: original.incomeId,
         expenseId: original.expenseId,
         donationId: original.donationId,
+        transferId: original.transferId,
       },
       reversalOfId: original.id,
     });

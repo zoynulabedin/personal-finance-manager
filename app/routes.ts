@@ -10,6 +10,7 @@ export default [
     route("expenses", "routes/expenses.tsx"),
     route("bills", "routes/bills.tsx"),
     route("donations", "routes/donations.tsx"),
+    route("transfers", "routes/transfers.tsx"),
     route("bank-accounts", "routes/bank-accounts.tsx"),
     route("transactions", "routes/transactions.tsx"),
     route("categories", "routes/categories.tsx"),
