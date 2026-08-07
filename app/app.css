@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Hind Siliguri", "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: "Noto Sans Bengali", "Hind Siliguri", "Inter", system-ui, -apple-system, sans-serif;
 }
 
 /* Custom Scrollbars */
