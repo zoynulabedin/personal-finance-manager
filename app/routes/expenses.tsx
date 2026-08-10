@@ -238,17 +238,17 @@ export async function action({ request }: Route.ActionArgs) {
         },
       });
 
-      // দান খরচ হলে DonationBalance এ spent যোগ হয়
-      // Category type check করি (DONATION) অথবা category name check করি (দান contains)
-      const categoryForExpense = await tx.category.findUnique({
+      // Category check করে Donation category কিনা দেখি
+      const category = await tx.category.findUnique({
         where: { id: refs.categoryId },
         select: { type: true, name: true },
       });
 
-      const isDonation = categoryForExpense?.type === "DONATION" ||
-                        categoryForExpense?.name?.toLowerCase().includes("দান");
+      const isDonationCategory = category?.type === "DONATION" ||
+                                category?.name?.toLowerCase().includes("দান");
 
-      if (isDonation) {
+      // দান খরচ হলে DonationBalance এ spent যোগ হয়
+      if (isDonationCategory) {
         await tx.donationBalance.upsert({
           where: { userId },
           create: {
@@ -260,14 +260,16 @@ export async function action({ request }: Route.ActionArgs) {
             spent: { increment: amount },
           },
         });
-      } else if (refs.bankAccountId) {
-        // সাধারণ খরচ হলে ব্যাংক থেকে কাটা হয়
+      }
+
+      // ব্যাংক অ্যাকাউন্ট সিলেক্ট করলে উভয় ক্ষেত্রেই সেখান থেকে কাটা হয়
+      if (refs.bankAccountId) {
         await debit(tx, {
           userId,
           bankAccountId: refs.bankAccountId,
           amount,
-          type: "EXPENSE",
-          description: `খরচ: ${title}`,
+          type: isDonationCategory ? "DONATION" : "EXPENSE",
+          description: isDonationCategory ? `দান: ${title}` : `খরচ: ${title}`,
           occurredAt: expenseDate,
           source: { expenseId: expense.id },
         });
