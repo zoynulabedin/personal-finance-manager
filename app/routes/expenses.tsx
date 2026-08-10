@@ -172,7 +172,7 @@ async function resolveReferences(
   categoryId: string | null,
   bankAccountId: string | null
 ): Promise<
-  | { ok: true; categoryId: string; bankAccountId: string | null }
+  | { ok: true; categoryId: string; bankAccountId: string | null; categoryType: string }
   | { ok: false; error: string }
 > {
   if (!categoryId) {
@@ -181,14 +181,14 @@ async function resolveReferences(
 
   const category = await prisma.category.findFirst({
     where: { id: categoryId, OR: [{ userId }, { userId: null }] },
-    select: { id: true },
+    select: { id: true, type: true },
   });
   if (!category) {
     return { ok: false, error: "নির্বাচিত ক্যাটাগরিটি বৈধ নয়।" };
   }
 
   if (!bankAccountId) {
-    return { ok: true, categoryId: category.id, bankAccountId: null };
+    return { ok: true, categoryId: category.id, bankAccountId: null, categoryType: category.type };
   }
 
   const bank = await prisma.bankAccount.findFirst({
@@ -199,7 +199,7 @@ async function resolveReferences(
     return { ok: false, error: "নির্বাচিত ব্যাংক একাউন্টটি বৈধ নয়।" };
   }
 
-  return { ok: true, categoryId: category.id, bankAccountId: bank.id };
+  return { ok: true, categoryId: category.id, bankAccountId: bank.id, categoryType: category.type };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -238,10 +238,36 @@ export async function action({ request }: Route.ActionArgs) {
         },
       });
 
-      // Choosing an account means the money came out of it. There is no longer
-      // an opt-out checkbox: an expense that names an account but leaves the
-      // balance untouched is exactly the inconsistency this model removes.
-      if (refs.bankAccountId) {
+      // দান খরচ হলে donation balance থেকে কাটা হয়
+      if (refs.categoryType === "DONATION") {
+        const donation = await tx.donation.findFirst({
+          where: { income: { userId }, paid: false, amount: { gte: amount } },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, bankAccountId: true, amount: true },
+        });
+
+        if (donation) {
+          // দান রেকর্ড মার্ক করা হয় paid হিসেবে
+          await tx.donation.update({
+            where: { id: donation.id },
+            data: { paid: true, paidDate: expenseDate },
+          });
+
+          // দান ব্যালেন্স থেকে কাটা হয়
+          if (donation.bankAccountId) {
+            await debit(tx, {
+              userId,
+              bankAccountId: donation.bankAccountId,
+              amount,
+              type: "DONATION",
+              description: `দান: ${title}`,
+              occurredAt: expenseDate,
+              source: { expenseId: expense.id },
+            });
+          }
+        }
+      } else if (refs.bankAccountId) {
+        // সাধারণ খরচ হলে ব্যাংক থেকে কাটা হয়
         await debit(tx, {
           userId,
           bankAccountId: refs.bankAccountId,
