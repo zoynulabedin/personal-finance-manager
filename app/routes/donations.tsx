@@ -40,7 +40,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     ? { userId }
     : { userId, month: selectedMonth, year: selectedYear };
 
-  const [monthlyIncomes, donations, bankAccounts] = await Promise.all([
+  const [monthlyIncomes, donations, bankAccounts, donationBalance] = await Promise.all([
     prisma.income.findMany({
       where: { userId, month: selectedMonth, year: selectedYear },
       select: { amount: true },
@@ -55,6 +55,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     prisma.bankAccount.findMany({
       where: { userId },
       orderBy: { bankName: "asc" },
+    }),
+    prisma.donationBalance.findUnique({
+      where: { userId },
+      select: { allocated: true, spent: true },
     }),
   ]);
 
@@ -76,6 +80,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     donations.filter((d) => !d.paid).reduce((sum, d) => sum + d.amount, 0)
   );
 
+  const donationAllocated = donationBalance?.allocated ?? 0;
+  const donationSpent = donationBalance?.spent ?? 0;
+  const donationRemaining = roundMoney(donationAllocated - donationSpent);
+
   return {
     donations,
     bankAccounts,
@@ -84,6 +92,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     totalAllDonations,
     paidDonations,
     pendingDonations,
+    donationAllocated,
+    donationSpent,
+    donationRemaining,
     selectedMonth,
     selectedYear,
     showAll,
@@ -292,6 +303,37 @@ export default function DonationsPage() {
               {formatBDT(pendingDonations, useBengaliDigits)}
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Donation Balance Card */}
+      <div className="glass-card p-6 rounded-2xl border border-slate-800 bg-gradient-to-r from-purple-950/40 via-slate-900 to-slate-900">
+        <div className="flex items-center gap-2 text-xs font-semibold text-purple-400 uppercase tracking-wider mb-2">
+          <Wallet className="w-4 h-4" />
+          <span>দান ব্যালেন্স ট্র্যাকার</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <span className="text-[11px] font-medium text-slate-400 uppercase">মোট বরাদ্দ</span>
+            <div className="text-2xl font-extrabold text-purple-400 mt-1">
+              {formatBDT(donationAllocated, useBengaliDigits)}
+            </div>
+          </div>
+          <div>
+            <span className="text-[11px] font-medium text-slate-400 uppercase">মোট খরচ</span>
+            <div className="text-2xl font-extrabold text-rose-400 mt-1">
+              {formatBDT(donationSpent, useBengaliDigits)}
+            </div>
+          </div>
+          <div>
+            <span className="text-[11px] font-medium text-slate-400 uppercase">অবশিষ্ট ব্যালেন্স</span>
+            <div className={`text-2xl font-extrabold mt-1 ${donationRemaining > 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
+              {formatBDT(donationRemaining, useBengaliDigits)}
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 text-xs text-slate-400">
+          <strong>নতুন সিস্টেম:</strong> Expenses → "দান" ক্যাটেগরি দিয়ে যেকোনো পরিমাণ দান করুন, এটি স্বয়ংক্রিয়ভাবে এখানে ট্র্যাক হবে
         </div>
       </div>
 
