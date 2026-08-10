@@ -53,6 +53,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     todayAgg,
     bankAccounts,
     donationRows,
+    donationBalance,
     pendingBills,
     recentExpenses,
     windowIncomes,
@@ -78,6 +79,10 @@ export async function loader({ request }: Route.LoaderArgs) {
         income: { userId, month: currentMonth, year: currentYear },
       },
       select: { amount: true, paid: true },
+    }),
+    prisma.donationBalance.findUnique({
+      where: { userId },
+      select: { allocated: true, spent: true },
     }),
     prisma.bill.findMany({
       where: { userId, paid: false },
@@ -181,6 +186,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
+  const donationAllocated = donationBalance?.allocated ?? 0;
+  const donationSpent = donationBalance?.spent ?? 0;
+  const donationRemaining = roundMoney(donationAllocated - donationSpent);
+
   return {
     currentMonthIncome,
     currentMonthExpense,
@@ -190,6 +199,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     cashBalance,
     totalDonationAmount,
     pendingDonationAmount,
+    donationAllocated,
+    donationSpent,
+    donationRemaining,
     pendingBills,
     totalPendingBillsAmount,
     recentExpenses,

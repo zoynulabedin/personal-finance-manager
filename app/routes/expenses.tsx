@@ -238,34 +238,14 @@ export async function action({ request }: Route.ActionArgs) {
         },
       });
 
-      // দান খরচ হলে donation balance থেকে কাটা হয়
+      // দান খরচ হলে DonationBalance এ spent যোগ হয়
       if (refs.categoryType === "DONATION") {
-        const donation = await tx.donation.findFirst({
-          where: { income: { userId }, paid: false, amount: { gte: amount } },
-          orderBy: { createdAt: "asc" },
-          select: { id: true, bankAccountId: true, amount: true },
+        await tx.donationBalance.update({
+          where: { userId },
+          data: {
+            spent: { increment: amount },
+          },
         });
-
-        if (donation) {
-          // দান রেকর্ড মার্ক করা হয় paid হিসেবে
-          await tx.donation.update({
-            where: { id: donation.id },
-            data: { paid: true, paidDate: expenseDate },
-          });
-
-          // দান ব্যালেন্স থেকে কাটা হয়
-          if (donation.bankAccountId) {
-            await debit(tx, {
-              userId,
-              bankAccountId: donation.bankAccountId,
-              amount,
-              type: "DONATION",
-              description: `দান: ${title}`,
-              occurredAt: expenseDate,
-              source: { expenseId: expense.id },
-            });
-          }
-        }
       } else if (refs.bankAccountId) {
         // সাধারণ খরচ হলে ব্যাংক থেকে কাটা হয়
         await debit(tx, {

@@ -96,6 +96,8 @@ export async function action({ request }: Route.ActionArgs) {
         return { error: "নির্বাচিত অ্যাকাউন্টটি বৈধ নয়।" };
       }
 
+      const donationAmount = donationFor(amount, DEFAULT_DONATION_PERCENTAGE);
+
       const income = await tx.income.create({
         data: {
           userId,
@@ -109,10 +111,23 @@ export async function action({ request }: Route.ActionArgs) {
           donations: {
             create: {
               percentage: DEFAULT_DONATION_PERCENTAGE,
-              amount: donationFor(amount, DEFAULT_DONATION_PERCENTAGE),
+              amount: donationAmount,
               paid: false,
             },
           },
+        },
+      });
+
+      // DonationBalance এ allocated যোগ করা
+      await tx.donationBalance.upsert({
+        where: { userId },
+        create: {
+          userId,
+          allocated: donationAmount,
+          spent: 0,
+        },
+        update: {
+          allocated: { increment: donationAmount },
         },
       });
 
@@ -145,6 +160,17 @@ export async function action({ request }: Route.ActionArgs) {
         include: { donations: true },
       });
       if (!income) return;
+
+      // DonationBalance থেকে allocated বাদ দেওয়া
+      const totalDonation = income.donations.reduce((sum, d) => sum + d.amount, 0);
+      if (totalDonation > 0) {
+        await tx.donationBalance.update({
+          where: { userId },
+          data: {
+            allocated: { decrement: totalDonation },
+          },
+        });
+      }
 
       // Take the credited money back out, and refund any donation already paid
       // from it, before the row (and its donations) disappear.

@@ -28,6 +28,7 @@ model User {
   bills        Bill[]
   ledgerEntries LedgerEntry[]
   transfers    Transfer[]
+  donationBalance DonationBalance?
 }
 
 model Income {
@@ -212,4 +213,16 @@ model Transfer {
   @@index([userId, occurredAt])
   @@index([fromAccountId])
   @@index([toAccountId])
+}
+
+model DonationBalance {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  allocated Float @default(0.0)
+  spent     Float @default(0.0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
