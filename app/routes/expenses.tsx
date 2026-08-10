@@ -239,7 +239,16 @@ export async function action({ request }: Route.ActionArgs) {
       });
 
       // দান খরচ হলে DonationBalance এ spent যোগ হয়
-      if (refs.categoryType === "DONATION") {
+      // Category type check করি (DONATION) অথবা category name check করি (দান contains)
+      const categoryForExpense = await tx.category.findUnique({
+        where: { id: refs.categoryId },
+        select: { type: true, name: true },
+      });
+
+      const isDonation = categoryForExpense?.type === "DONATION" ||
+                        categoryForExpense?.name?.toLowerCase().includes("দান");
+
+      if (isDonation) {
         await tx.donationBalance.upsert({
           where: { userId },
           create: {
@@ -284,7 +293,9 @@ export async function action({ request }: Route.ActionArgs) {
       if (existing.bill) return;
 
       // দান খরচ মুছলে DonationBalance থেকে spent কমা
-      if (existing.category?.type === "DONATION") {
+      const isDonation = existing.category?.type === "DONATION" ||
+                        existing.category?.name?.toLowerCase().includes("দান");
+      if (isDonation) {
         await tx.donationBalance.update({
           where: { userId },
           data: {
