@@ -16,6 +16,7 @@ import {
   debit,
   reverseLedgerFor,
 } from "../lib/ledger.server";
+import { adjustDonationBalance } from "../lib/donation-balance.server";
 import {
   parseMonthParam,
   parseYearParam,
@@ -144,6 +145,11 @@ export async function action({ request }: Route.ActionArgs) {
         source: { donationId: donation.id },
       });
 
+      // The obligation has now actually been met. Without this the tracker
+      // kept reporting the full allocation as outstanding no matter how many
+      // donations were paid.
+      await adjustDonationBalance(tx, userId, { spent: donation.amount });
+
       return { ok: true as const };
     });
 
@@ -175,6 +181,9 @@ export async function action({ request }: Route.ActionArgs) {
         { donationId: donation.id },
         `দান বাতিল: ${donation.income.title}`
       );
+
+      // Mirror of pay_donation: the money is back, so it is unspent again.
+      await adjustDonationBalance(tx, userId, { spent: -donation.amount });
 
       return { ok: true as const };
     });

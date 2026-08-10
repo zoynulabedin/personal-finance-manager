@@ -25,8 +25,13 @@ export function parseAmount(
   const raw = value.toString().trim();
   if (raw === "") return null;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return roundMoney(parsed);
+  if (!Number.isFinite(parsed)) return null;
+  // Round *before* the guard. Checking first let "0.004" through, and callers
+  // only test for null — so a zero-amount row was created with no ledger entry
+  // behind it.
+  const rounded = roundMoney(parsed);
+  if (rounded <= 0) return null;
+  return rounded;
 }
 
 /** Same as parseAmount but allows zero and negatives (e.g. a bank balance). */

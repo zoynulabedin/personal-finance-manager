@@ -126,7 +126,9 @@ export async function action({ request }: Route.ActionArgs) {
     if (!accountId) return { error: "কোন অ্যাকাউন্ট থেকে পরিশোধ করবেন তা নির্বাচন করুন।" };
     if (!categoryId) return { error: "খরচের ক্যাটাগরি নির্বাচন করুন।" };
 
-    const result = await prisma.$transaction(async (tx) => {
+    let result: { ok: true } | { error: string };
+    try {
+      result = await prisma.$transaction(async (tx) => {
       const bill = await tx.bill.findFirst({ where: { id, userId } });
       if (!bill) return { error: "বিলটি পাওয়া যায়নি।" };
       if (bill.paid) return { error: "এই বিলটি ইতোমধ্যে পরিশোধিত।" };
@@ -173,7 +175,17 @@ export async function action({ request }: Route.ActionArgs) {
       }
 
       return { ok: true as const };
-    });
+      });
+    } catch (error) {
+      // The throw above is how the transaction is rolled back; it is an
+      // expected outcome of a double submit, not a server fault, so turn it
+      // back into the same message every other branch returns instead of
+      // letting it reach the error boundary as a 500.
+      if (error instanceof Error && error.message === "BILL_ALREADY_PAID") {
+        return { error: "এই বিলটি ইতোমধ্যে পরিশোধিত।" };
+      }
+      throw error;
+    }
 
     if ("error" in result) return result;
     return redirect("/bills");

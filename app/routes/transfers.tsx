@@ -91,14 +91,27 @@ export async function action({ request }: Route.ActionArgs) {
         },
       });
 
-      const desc = `ট্রান্সফার থেকে ${await tx.bankAccount.findUnique({ where: { id: to }, select: { bankName: true } }).then(a => a?.bankName || "অন্য অ্যাকাউন্ট")}`;
+      // Each leg names the *other* account. The single shared string this
+      // replaces was built from the destination and used on both entries, so
+      // the source account's statement claimed the money came from the
+      // destination, and the destination's claimed it came from itself.
+      const names = await tx.bankAccount.findMany({
+        where: { id: { in: [from, to] } },
+        select: { id: true, bankName: true, accountName: true },
+      });
+      const label = (id: string) => {
+        const account = names.find((a) => a.id === id);
+        return account
+          ? `${account.bankName} — ${account.accountName}`
+          : "অন্য অ্যাকাউন্ট";
+      };
 
       await debit(tx, {
         userId,
         bankAccountId: from,
         amount,
         type: "TRANSFER",
-        description: desc,
+        description: `ট্রান্সফার → ${label(to)}`,
         occurredAt,
         source: { transferId: transfer.id },
       });
@@ -108,7 +121,7 @@ export async function action({ request }: Route.ActionArgs) {
         bankAccountId: to,
         amount,
         type: "TRANSFER",
-        description: desc,
+        description: `ট্রান্সফার ← ${label(from)}`,
         occurredAt,
         source: { transferId: transfer.id },
       });

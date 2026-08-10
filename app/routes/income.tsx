@@ -18,6 +18,7 @@ import {
   credit,
   reverseLedgerFor,
 } from "../lib/ledger.server";
+import { adjustDonationBalance } from "../lib/donation-balance.server";
 import { toDateInputValue, todayInputValue } from "../utils/date";
 import type { LayoutContextType } from "./layout";
 import { formatBDT, BENGALI_MONTHS, toBengaliDigits } from "../utils/bengali";
@@ -119,17 +120,7 @@ export async function action({ request }: Route.ActionArgs) {
       });
 
       // DonationBalance এ allocated যোগ করা
-      await tx.donationBalance.upsert({
-        where: { userId },
-        create: {
-          userId,
-          allocated: donationAmount,
-          spent: 0,
-        },
-        update: {
-          allocated: { increment: donationAmount },
-        },
-      });
+      await adjustDonationBalance(tx, userId, { allocated: donationAmount });
 
       // The money is now in the account. Previously income was recorded but no
       // balance moved, so the user had to retype the balance by hand.
@@ -161,16 +152,21 @@ export async function action({ request }: Route.ActionArgs) {
       });
       if (!income) return;
 
-      // DonationBalance থেকে allocated বাদ দেওয়া
-      const totalDonation = income.donations.reduce((sum, d) => sum + d.amount, 0);
-      if (totalDonation > 0) {
-        await tx.donationBalance.update({
-          where: { userId },
-          data: {
-            allocated: { decrement: totalDonation },
-          },
-        });
-      }
+      // The obligation disappears with the income, and so does anything
+      // already given against it — otherwise `allocated - spent` would keep
+      // describing money that no longer has a source.
+      const totalDonation = roundMoney(
+        income.donations.reduce((sum, d) => sum + d.amount, 0)
+      );
+      const paidDonation = roundMoney(
+        income.donations
+          .filter((d) => d.paid)
+          .reduce((sum, d) => sum + d.amount, 0)
+      );
+      await adjustDonationBalance(tx, userId, {
+        allocated: -totalDonation,
+        spent: -paidDonation,
+      });
 
       // Take the credited money back out, and refund any donation already paid
       // from it, before the row (and its donations) disappear.
@@ -260,10 +256,17 @@ export async function action({ request }: Route.ActionArgs) {
       });
 
       let donationWasReset = false;
+      // Every change to a donation row has to move the tracker by the same
+      // amount. Accumulate here and apply once, so a multi-donation income
+      // still ends up with exactly one balanced adjustment.
+      let allocatedDelta = 0;
+      let spentDelta = 0;
 
       for (const donation of income.donations) {
         const newAmount = donationFor(amount, donation.percentage);
         if (newAmount === donation.amount) continue;
+
+        allocatedDelta += newAmount - donation.amount;
 
         if (donation.paid) {
           // The old figure was already transferred out. Refund it and put the
@@ -285,6 +288,9 @@ export async function action({ request }: Route.ActionArgs) {
               bankAccountId: null,
             },
           });
+          // The money came back with the reversal above, so it is no longer
+          // spent.
+          spentDelta -= donation.amount;
           donationWasReset = true;
         } else {
           await tx.donation.update({
@@ -295,15 +301,22 @@ export async function action({ request }: Route.ActionArgs) {
       }
 
       if (income.donations.length === 0) {
+        const newDonation = donationFor(amount, DEFAULT_DONATION_PERCENTAGE);
         await tx.donation.create({
           data: {
             incomeId: income.id,
             percentage: DEFAULT_DONATION_PERCENTAGE,
-            amount: donationFor(amount, DEFAULT_DONATION_PERCENTAGE),
+            amount: newDonation,
             paid: false,
           },
         });
+        allocatedDelta += newDonation;
       }
+
+      await adjustDonationBalance(tx, userId, {
+        allocated: allocatedDelta,
+        spent: spentDelta,
+      });
 
       return { ok: true as const, donationWasReset };
     });

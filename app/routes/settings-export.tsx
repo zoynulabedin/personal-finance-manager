@@ -13,8 +13,15 @@ export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireUser(request);
   const userId = user.id;
 
-  const [incomes, expenses, bills, bankAccounts, categories, ledgerEntries] =
-    await Promise.all([
+  const [
+    incomes,
+    expenses,
+    bills,
+    bankAccounts,
+    categories,
+    ledgerEntries,
+    transfers,
+  ] = await Promise.all([
       prisma.income.findMany({
         where: { userId },
         include: { donations: true },
@@ -35,10 +42,17 @@ export async function loader({ request }: Route.LoaderArgs) {
         where: { userId },
         orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }],
       }),
+      // Ledger entries carry a `transferId`, so without the transfers
+      // themselves a restored backup has entries referring to rows that don't
+      // exist — and those entries can then never be reversed.
+      prisma.transfer.findMany({
+        where: { userId },
+        orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }],
+      }),
     ]);
 
   const backupData = {
-    version: "3.0",
+    version: "3.1",
     exportedAt: new Date().toISOString(),
     user: { name: user.name, email: user.email },
     categories,
@@ -46,6 +60,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     incomes,
     expenses,
     bills,
+    transfers,
     ledgerEntries,
   };
 

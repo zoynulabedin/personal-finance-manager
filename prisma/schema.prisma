@@ -167,7 +167,8 @@ model LedgerEntry {
 
   /// Signed: positive credits the account, negative debits it.
   amount      Float
-  /// OPENING | INCOME | EXPENSE | DONATION | ADJUSTMENT
+  /// OPENING | INCOME | EXPENSE | DONATION | TRANSFER | ADJUSTMENT
+  /// (kept in sync with `LedgerType` in app/lib/ledger.server.ts)
   type        String
   description String
   occurredAt  DateTime    @default(now())

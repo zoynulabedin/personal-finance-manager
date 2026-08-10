@@ -13,6 +13,10 @@ import { prisma } from "../lib/db.server";
 import { requireUserId } from "../lib/auth.server";
 import { debit, reverseLedgerFor } from "../lib/ledger.server";
 import {
+  adjustDonationBalance,
+  isDonationCategory,
+} from "../lib/donation-balance.server";
+import {
   dayRange,
   monthRange,
   parseAmount,
@@ -172,7 +176,13 @@ async function resolveReferences(
   categoryId: string | null,
   bankAccountId: string | null
 ): Promise<
-  | { ok: true; categoryId: string; bankAccountId: string | null; categoryType: string }
+  | {
+      ok: true;
+      categoryId: string;
+      bankAccountId: string | null;
+      categoryType: string;
+      isDonation: boolean;
+    }
   | { ok: false; error: string }
 > {
   if (!categoryId) {
@@ -181,14 +191,24 @@ async function resolveReferences(
 
   const category = await prisma.category.findFirst({
     where: { id: categoryId, OR: [{ userId }, { userId: null }] },
-    select: { id: true, type: true },
+    // `name` comes back too: the default "💰 দান" category is created with the
+    // generic EXPENSE type, so the name is the only way to recognise it.
+    select: { id: true, type: true, name: true },
   });
   if (!category) {
     return { ok: false, error: "নির্বাচিত ক্যাটাগরিটি বৈধ নয়।" };
   }
 
+  const isDonation = isDonationCategory(category);
+
   if (!bankAccountId) {
-    return { ok: true, categoryId: category.id, bankAccountId: null, categoryType: category.type };
+    return {
+      ok: true,
+      categoryId: category.id,
+      bankAccountId: null,
+      categoryType: category.type,
+      isDonation,
+    };
   }
 
   const bank = await prisma.bankAccount.findFirst({
@@ -199,7 +219,13 @@ async function resolveReferences(
     return { ok: false, error: "নির্বাচিত ব্যাংক একাউন্টটি বৈধ নয়।" };
   }
 
-  return { ok: true, categoryId: category.id, bankAccountId: bank.id, categoryType: category.type };
+  return {
+    ok: true,
+    categoryId: category.id,
+    bankAccountId: bank.id,
+    categoryType: category.type,
+    isDonation,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -238,28 +264,9 @@ export async function action({ request }: Route.ActionArgs) {
         },
       });
 
-      // Category check করে Donation category কিনা দেখি
-      const category = await tx.category.findUnique({
-        where: { id: refs.categoryId },
-        select: { type: true, name: true },
-      });
-
-      const isDonationCategory = category?.type === "DONATION" ||
-                                category?.name?.toLowerCase().includes("দান");
-
       // দান খরচ হলে DonationBalance এ spent যোগ হয়
-      if (isDonationCategory) {
-        await tx.donationBalance.upsert({
-          where: { userId },
-          create: {
-            userId,
-            allocated: 0,
-            spent: amount,
-          },
-          update: {
-            spent: { increment: amount },
-          },
-        });
+      if (refs.isDonation) {
+        await adjustDonationBalance(tx, userId, { spent: amount });
       }
 
       // ব্যাংক অ্যাকাউন্ট সিলেক্ট করলে উভয় ক্ষেত্রেই সেখান থেকে কাটা হয়
@@ -268,8 +275,8 @@ export async function action({ request }: Route.ActionArgs) {
           userId,
           bankAccountId: refs.bankAccountId,
           amount,
-          type: isDonationCategory ? "DONATION" : "EXPENSE",
-          description: isDonationCategory ? `দান: ${title}` : `খরচ: ${title}`,
+          type: refs.isDonation ? "DONATION" : "EXPENSE",
+          description: refs.isDonation ? `দান: ${title}` : `খরচ: ${title}`,
           occurredAt: expenseDate,
           source: { expenseId: expense.id },
         });
@@ -283,32 +290,26 @@ export async function action({ request }: Route.ActionArgs) {
     const id = formData.get("id")?.toString();
     if (!id) return { error: "অবৈধ অনুরোধ।" };
 
-    await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const existing = await tx.expense.findFirst({
         where: { id, userId },
         include: { category: true, bill: true },
       });
-      if (!existing) return;
+      if (!existing) return { error: "খরচের রেকর্ড পাওয়া যায়নি।" };
 
       // A bill's payment expense can't be deleted from here, or the bill would
-      // still claim to be paid with nothing backing it.
-      if (existing.bill) return;
+      // still claim to be paid with nothing backing it. Say so instead of
+      // returning success while nothing happens.
+      if (existing.bill) {
+        return {
+          error:
+            "এই খরচটি একটি পরিশোধিত বিলের সাথে যুক্ত। বিল পাতা থেকে পরিশোধ বাতিল করুন।",
+        };
+      }
 
       // দান খরচ মুছলে DonationBalance থেকে spent কমা
-      const isDonation = existing.category?.type === "DONATION" ||
-                        existing.category?.name?.toLowerCase().includes("দান");
-      if (isDonation) {
-        await tx.donationBalance.upsert({
-          where: { userId },
-          create: {
-            userId,
-            allocated: 0,
-            spent: 0,
-          },
-          update: {
-            spent: { decrement: existing.amount },
-          },
-        });
+      if (isDonationCategory(existing.category)) {
+        await adjustDonationBalance(tx, userId, { spent: -existing.amount });
       }
 
       await reverseLedgerFor(
@@ -319,8 +320,11 @@ export async function action({ request }: Route.ActionArgs) {
       );
 
       await tx.expense.delete({ where: { id: existing.id } });
+
+      return { ok: true as const };
     });
 
+    if ("error" in result) return result;
     return { success: true };
   }
 
@@ -346,12 +350,26 @@ export async function action({ request }: Route.ActionArgs) {
     );
     if (!refs.ok) return { error: refs.error };
 
-    await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const existing = await tx.expense.findFirst({
         where: { id, userId },
-        select: { id: true, title: true, bill: { select: { id: true } } },
+        select: {
+          id: true,
+          title: true,
+          // Needed to undo the old row's effect on the donation tracker:
+          // an edit can change the amount, the category, or both.
+          amount: true,
+          category: { select: { name: true, type: true } },
+          bill: { select: { id: true } },
+        },
       });
-      if (!existing || existing.bill) return;
+      if (!existing) return { error: "খরচের রেকর্ড পাওয়া যায়নি।" };
+      if (existing.bill) {
+        return {
+          error:
+            "এই খরচটি একটি পরিশোধিত বিলের সাথে যুক্ত। বিল পাতা থেকে পরিশোধ বাতিল করুন।",
+        };
+      }
 
       // Undo whatever the old row took out — from whichever account it took it
       // — then apply the corrected figures.
@@ -361,6 +379,15 @@ export async function action({ request }: Route.ActionArgs) {
         { expenseId: existing.id },
         `খরচ সংশোধন: ${existing.title}`
       );
+
+      // Same idea for the donation tracker: take the old figure back out
+      // before putting the new one in, which also covers moving an expense
+      // into or out of a donation category.
+      const wasDonation = isDonationCategory(existing.category);
+      await adjustDonationBalance(tx, userId, {
+        spent:
+          (refs.isDonation ? amount : 0) - (wasDonation ? existing.amount : 0),
+      });
 
       await tx.expense.update({
         where: { id: existing.id },
@@ -380,14 +407,19 @@ export async function action({ request }: Route.ActionArgs) {
           userId,
           bankAccountId: refs.bankAccountId,
           amount,
-          type: "EXPENSE",
-          description: `খরচ: ${title}`,
+          // Must match what `create` posts, or editing a donation expense
+          // silently retypes its ledger entry back to EXPENSE.
+          type: refs.isDonation ? "DONATION" : "EXPENSE",
+          description: refs.isDonation ? `দান: ${title}` : `খরচ: ${title}`,
           occurredAt: expenseDate,
           source: { expenseId: existing.id },
         });
       }
+
+      return { ok: true as const };
     });
 
+    if ("error" in result) return result;
     return redirect("/expenses");
   }
 

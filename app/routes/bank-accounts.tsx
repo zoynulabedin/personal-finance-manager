@@ -139,18 +139,45 @@ export async function action({ request }: Route.ActionArgs) {
 
     // Anything that references the account would lose its history, and the
     // ledger entries behind the balance would go with it.
-    const [expenseCount, donationCount, incomeCount] = await Promise.all([
-      prisma.expense.count({ where: { bankAccountId: id, userId } }),
-      prisma.donation.count({
-        where: { bankAccountId: id, income: { userId } },
-      }),
-      prisma.income.count({ where: { bankAccountId: id, userId } }),
-    ]);
+    //
+    // LedgerEntry and Transfer both cascade on delete, so they have to be
+    // checked too — an account holding only an opening balance, a manual
+    // adjustment, or an incoming transfer has no income/expense/donation rows
+    // and would otherwise be deleted, taking the entries that explain its
+    // balance with it. Worse, deleting one side of a transfer removes that
+    // leg's entry while the other side's credit survives, so money would
+    // appear from nowhere.
+    const [expenseCount, donationCount, incomeCount, ledgerCount, transferCount] =
+      await Promise.all([
+        prisma.expense.count({ where: { bankAccountId: id, userId } }),
+        prisma.donation.count({
+          where: { bankAccountId: id, income: { userId } },
+        }),
+        prisma.income.count({ where: { bankAccountId: id, userId } }),
+        prisma.ledgerEntry.count({ where: { bankAccountId: id, userId } }),
+        prisma.transfer.count({
+          where: { userId, OR: [{ fromAccountId: id }, { toAccountId: id }] },
+        }),
+      ]);
 
     if (expenseCount > 0 || donationCount > 0 || incomeCount > 0) {
       return {
         error:
           "এই একাউন্টের সাথে আয়, খরচ বা দানের রেকর্ড যুক্ত রয়েছে, তাই মুছে ফেলা সম্ভব নয়।",
+      };
+    }
+
+    if (transferCount > 0) {
+      return {
+        error:
+          "এই একাউন্টের সাথে ট্রান্সফারের রেকর্ড যুক্ত রয়েছে, তাই মুছে ফেলা সম্ভব নয়।",
+      };
+    }
+
+    if (ledgerCount > 0) {
+      return {
+        error:
+          "এই একাউন্টের লেনদেনের ইতিহাস রয়েছে, তাই মুছে ফেলা সম্ভব নয়। ব্যালেন্স শূন্য করে রাখতে পারেন।",
       };
     }
 

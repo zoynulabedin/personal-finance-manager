@@ -18,7 +18,9 @@ const DEFAULT_CATEGORIES = [
   { name: "🎓 শিক্ষা", icon: "book-open", color: "#3b82f6" },
   { name: "👕 পোশাক", icon: "shirt", color: "#a855f7" },
   { name: "🎁 উপহার", icon: "gift", color: "#f43f5e" },
-  { name: "💰 দান", icon: "heart", color: "#10b981" },
+  // Typed explicitly: expenses here count against the 1% donation
+  // obligation, and the name check is only a fallback for older rows.
+  { name: "💰 দান", icon: "heart", color: "#10b981", type: "DONATION" },
   { name: "👶 সন্তান", icon: "baby", color: "#06b6d4" },
   { name: "🛠 মেরামত", icon: "wrench", color: "#64748b" },
   { name: "🛒 শপিং", icon: "shopping-cart", color: "#d946ef" },

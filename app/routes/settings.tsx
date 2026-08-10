@@ -23,6 +23,8 @@ import {
   parseText,
   roundMoney,
 } from "../lib/validation.server";
+import { postLedgerEntry } from "../lib/ledger.server";
+import { isDonationCategory } from "../lib/donation-balance.server";
 import type { LayoutContextType } from "./layout";
 import { Settings, User, Lock, Download, Upload } from "lucide-react";
 
@@ -174,11 +176,15 @@ export async function action({
           // Scoped to this user only. Expenses first (they reference
           // categories and bank accounts), then donations via income cascade.
           await tx.ledgerEntry.deleteMany({ where: { userId } });
+          await tx.transfer.deleteMany({ where: { userId } });
           await tx.bill.deleteMany({ where: { userId } });
           await tx.expense.deleteMany({ where: { userId } });
           await tx.income.deleteMany({ where: { userId } });
           await tx.bankAccount.deleteMany({ where: { userId } });
           await tx.category.deleteMany({ where: { userId } });
+          // The donation tracker is a cache over rows that no longer exist.
+          // It is rebuilt from the restored data at the end of this import.
+          await tx.donationBalance.deleteMany({ where: { userId } });
         }
 
         /**
@@ -192,6 +198,18 @@ export async function action({
         const incomeIdMap = new Map<string, string>();
         const expenseIdMap = new Map<string, string>();
         const donationIdMap = new Map<string, string>();
+        const transferIdMap = new Map<string, string>();
+        // A reversal entry points at the original it undid. Restoring that
+        // link matters: `reverseLedgerFor` treats an entry with no
+        // `reversalOfId` as an original, so a reversal imported without it
+        // gets reversed a second time on the next edit and money vanishes.
+        const ledgerIdMap = new Map<string, string>();
+
+        // The donation tracker is rebuilt from the rows actually restored,
+        // rather than trusting a figure in the file that may not match them.
+        const donationCategoryIds = new Set<string>();
+        let allocatedTotal = 0;
+        let spentTotal = 0;
 
         for (const cat of asArray(parsed.categories)) {
           const name = parseText(cat?.name);
@@ -206,6 +224,7 @@ export async function action({
             },
           });
           if (typeof cat.id === "string") categoryIdMap.set(cat.id, created.id);
+          if (isDonationCategory(created)) donationCategoryIds.add(created.id);
         }
 
         for (const bank of asArray(parsed.bankAccounts)) {
@@ -294,17 +313,21 @@ export async function action({
               if (typeof don?.id === "string") {
                 donationIdMap.set(don.id, createdDonation.id);
               }
+              allocatedTotal += createdDonation.amount;
+              if (createdDonation.paid) spentTotal += createdDonation.amount;
             }
           } else {
             // Older backups have no donations array — regenerate the 1% row.
+            const regenerated = roundMoney(amount * 0.01);
             await tx.donation.create({
               data: {
                 incomeId: createdIncome.id,
                 percentage: 1.0,
-                amount: roundMoney(amount * 0.01),
+                amount: regenerated,
                 paid: false,
               },
             });
+            allocatedTotal += regenerated;
           }
         }
 
@@ -340,6 +363,9 @@ export async function action({
           });
           expenseCount += 1;
           if (typeof exp.id === "string") expenseIdMap.set(exp.id, createdExpense.id);
+          if (donationCategoryIds.has(mappedCategory)) {
+            spentTotal += createdExpense.amount;
+          }
         }
 
         let billCount = 0;
@@ -350,6 +376,15 @@ export async function action({
           if (!title || amount === null) continue;
           if (!dueDate || Number.isNaN(dueDate.getTime())) continue;
 
+          // Without the expense link a restored paid bill can't be unpaid:
+          // `unpay_bill` would flip the flag but leave the expense and its
+          // ledger debit in place, and the bill could then be paid a second
+          // time. The expense loop above has already run, so the id maps.
+          const linkedExpenseId =
+            typeof bill?.expenseId === "string"
+              ? expenseIdMap.get(bill.expenseId) ?? null
+              : null;
+
           await tx.bill.create({
             data: {
               userId,
@@ -359,15 +394,60 @@ export async function action({
               paid: bill?.paid === true,
               paidDate: bill?.paidDate ? new Date(bill.paidDate) : null,
               note: parseText(bill?.note),
+              expenseId: linkedExpenseId,
             },
           });
           billCount += 1;
         }
 
+        // Transfers were exported by neither the old backup nor restored by
+        // the old importer, so every round trip lost them — and the ledger
+        // entries they produced were left pointing at nothing, which made them
+        // impossible to reverse.
+        let transferCount = 0;
+        for (const tr of asArray(parsed.transfers)) {
+          const fromAccountId =
+            typeof tr?.fromAccountId === "string"
+              ? bankIdMap.get(tr.fromAccountId)
+              : undefined;
+          const toAccountId =
+            typeof tr?.toAccountId === "string"
+              ? bankIdMap.get(tr.toAccountId)
+              : undefined;
+          const trAmount = parseAmount(tr?.amount);
+          if (!fromAccountId || !toAccountId || trAmount === null) continue;
+          if (fromAccountId === toAccountId) continue;
+
+          const createdTransfer = await tx.transfer.create({
+            data: {
+              userId,
+              fromAccountId,
+              toAccountId,
+              amount: trAmount,
+              note: parseText(tr?.note),
+              occurredAt: tr?.occurredAt ? new Date(tr.occurredAt) : undefined,
+            },
+          });
+          transferCount += 1;
+          if (typeof tr?.id === "string") {
+            transferIdMap.set(tr.id, createdTransfer.id);
+          }
+        }
+
         const ledgerRows = asArray(parsed.ledgerEntries);
 
         if (ledgerRows.length > 0) {
-          for (const entry of ledgerRows) {
+          // Originals before reversals, so `reversalOfId` can be remapped as
+          // we go. The export is ordered by occurredAt, and a reversal always
+          // occurs at or after its original, but sorting explicitly means the
+          // import doesn't depend on that.
+          const orderedRows = [...ledgerRows].sort((a, b) => {
+            const aIsReversal = typeof a?.reversalOfId === "string" ? 1 : 0;
+            const bIsReversal = typeof b?.reversalOfId === "string" ? 1 : 0;
+            return aIsReversal - bIsReversal;
+          });
+
+          for (const entry of orderedRows) {
             const bankAccountId =
               typeof entry?.bankAccountId === "string"
                 ? bankIdMap.get(entry.bankAccountId)
@@ -377,17 +457,20 @@ export async function action({
               continue;
             }
 
-            await tx.ledgerEntry.create({
-              data: {
-                userId,
-                bankAccountId,
-                amount: entryAmount,
-                type: typeof entry.type === "string" ? entry.type : "ADJUSTMENT",
-                description:
-                  parseText(entry?.description) ?? "পুনরুদ্ধারকৃত এন্ট্রি",
-                occurredAt: entry?.occurredAt
-                  ? new Date(entry.occurredAt)
-                  : new Date(),
+            // Goes through the ledger rather than writing `currentBalance`
+            // directly, so the one place that is allowed to move a balance
+            // stays the only place that does.
+            const created = await postLedgerEntry(tx, {
+              userId,
+              bankAccountId,
+              amount: entryAmount,
+              type: typeof entry.type === "string" ? entry.type : "ADJUSTMENT",
+              description:
+                parseText(entry?.description) ?? "পুনরুদ্ধারকৃত এন্ট্রি",
+              occurredAt: entry?.occurredAt
+                ? new Date(entry.occurredAt)
+                : new Date(),
+              source: {
                 incomeId:
                   typeof entry?.incomeId === "string"
                     ? incomeIdMap.get(entry.incomeId) ?? null
@@ -400,14 +483,30 @@ export async function action({
                   typeof entry?.donationId === "string"
                     ? donationIdMap.get(entry.donationId) ?? null
                     : null,
-                reversedAt: entry?.reversedAt ? new Date(entry.reversedAt) : null,
+                transferId:
+                  typeof entry?.transferId === "string"
+                    ? transferIdMap.get(entry.transferId) ?? null
+                    : null,
               },
+              reversalOfId:
+                typeof entry?.reversalOfId === "string"
+                  ? ledgerIdMap.get(entry.reversalOfId) ?? null
+                  : null,
             });
 
-            await tx.bankAccount.update({
-              where: { id: bankAccountId },
-              data: { currentBalance: { increment: entryAmount } },
-            });
+            if (created) {
+              if (typeof entry?.id === "string") {
+                ledgerIdMap.set(entry.id, created.id);
+              }
+              // `postLedgerEntry` never sets this — a reversal is posted
+              // against a live entry, so the flag is applied afterwards.
+              if (entry?.reversedAt) {
+                await tx.ledgerEntry.update({
+                  where: { id: created.id },
+                  data: { reversedAt: new Date(entry.reversedAt) },
+                });
+              }
+            }
           }
         } else {
           // Backups written before the ledger existed only carry a closing
@@ -420,20 +519,31 @@ export async function action({
             if (!mapped || openingBalance === null || openingBalance === 0) {
               continue;
             }
-            await tx.ledgerEntry.create({
-              data: {
-                userId,
-                bankAccountId: mapped,
-                amount: openingBalance,
-                type: "OPENING",
-                description: "ব্যাকআপ থেকে পুনরুদ্ধারকৃত ব্যালেন্স",
-              },
-            });
-            await tx.bankAccount.update({
-              where: { id: mapped },
-              data: { currentBalance: { increment: openingBalance } },
+            await postLedgerEntry(tx, {
+              userId,
+              bankAccountId: mapped,
+              amount: openingBalance,
+              type: "OPENING",
+              description: "ব্যাকআপ থেকে পুনরুদ্ধারকৃত ব্যালেন্স",
             });
           }
+        }
+
+        // Rebuilt from the rows actually restored. Incremented rather than
+        // assigned, because a restore without "replace existing" adds to what
+        // is already there — and when it does replace, the row was deleted
+        // above so the increment starts from zero either way.
+        allocatedTotal = roundMoney(allocatedTotal);
+        spentTotal = roundMoney(spentTotal);
+        if (allocatedTotal > 0 || spentTotal > 0) {
+          await tx.donationBalance.upsert({
+            where: { userId },
+            create: { userId, allocated: allocatedTotal, spent: spentTotal },
+            update: {
+              allocated: { increment: allocatedTotal },
+              spent: { increment: spentTotal },
+            },
+          });
         }
 
         return {
@@ -442,11 +552,12 @@ export async function action({
           incomes: incomeCount,
           expenses: expenseCount,
           bills: billCount,
+          transfers: transferCount,
         };
       });
 
       return {
-        backupSuccess: `ডেটা সফলভাবে রিস্টোর হয়েছে — ${counts.categories}টি ক্যাটাগরি, ${counts.banks}টি একাউন্ট, ${counts.incomes}টি আয়, ${counts.expenses}টি খরচ, ${counts.bills}টি বিল।`,
+        backupSuccess: `ডেটা সফলভাবে রিস্টোর হয়েছে — ${counts.categories}টি ক্যাটাগরি, ${counts.banks}টি একাউন্ট, ${counts.incomes}টি আয়, ${counts.expenses}টি খরচ, ${counts.bills}টি বিল, ${counts.transfers}টি ট্রান্সফার।`,
       };
     } catch (error) {
       console.error("Backup import failed:", error);
