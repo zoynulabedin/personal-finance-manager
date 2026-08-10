@@ -240,9 +240,14 @@ export async function action({ request }: Route.ActionArgs) {
 
       // দান খরচ হলে DonationBalance এ spent যোগ হয়
       if (refs.categoryType === "DONATION") {
-        await tx.donationBalance.update({
+        await tx.donationBalance.upsert({
           where: { userId },
-          data: {
+          create: {
+            userId,
+            allocated: 0,
+            spent: amount,
+          },
+          update: {
             spent: { increment: amount },
           },
         });
@@ -270,13 +275,24 @@ export async function action({ request }: Route.ActionArgs) {
     await prisma.$transaction(async (tx) => {
       const existing = await tx.expense.findFirst({
         where: { id, userId },
-        select: { id: true, title: true, bill: { select: { id: true } } },
+        include: { category: { select: { type: true } } },
+        select: { id: true, amount: true, title: true, category: true, bill: { select: { id: true } } },
       });
       if (!existing) return;
 
       // A bill's payment expense can't be deleted from here, or the bill would
       // still claim to be paid with nothing backing it.
       if (existing.bill) return;
+
+      // দান খরচ মুছলে DonationBalance থেকে spent কমা
+      if (existing.category?.type === "DONATION") {
+        await tx.donationBalance.update({
+          where: { userId },
+          data: {
+            spent: { decrement: existing.amount },
+          },
+        });
+      }
 
       await reverseLedgerFor(
         tx,
