@@ -296,9 +296,14 @@ export async function action({ request }: Route.ActionArgs) {
       const isDonation = existing.category?.type === "DONATION" ||
                         existing.category?.name?.toLowerCase().includes("দান");
       if (isDonation) {
-        await tx.donationBalance.update({
+        await tx.donationBalance.upsert({
           where: { userId },
-          data: {
+          create: {
+            userId,
+            allocated: 0,
+            spent: 0,
+          },
+          update: {
             spent: { decrement: existing.amount },
           },
         });
