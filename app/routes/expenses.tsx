@@ -275,8 +275,7 @@ export async function action({ request }: Route.ActionArgs) {
     await prisma.$transaction(async (tx) => {
       const existing = await tx.expense.findFirst({
         where: { id, userId },
-        include: { category: { select: { type: true } } },
-        select: { id: true, amount: true, title: true, category: true, bill: { select: { id: true } } },
+        include: { category: true, bill: true },
       });
       if (!existing) return;
 
