@@ -29,6 +29,7 @@ model User {
   ledgerEntries LedgerEntry[]
   transfers    Transfer[]
   donationBalance DonationBalance?
+  backupSnapshots BackupSnapshot[]
 }
 
 model Income {
@@ -226,4 +227,38 @@ model DonationBalance {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// A stored copy of everything a user owns, in the same format as the
+/// downloadable backup file. Taken automatically once a day, on demand, and
+/// right before every restore so that a restore can itself be undone.
+///
+/// Written and read only by `app/lib/backup.server.ts`. A replace-restore
+/// wipes the user's data tables but never this one.
+model BackupSnapshot {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// AUTO | MANUAL | PRE_RESTORE
+  /// (kept in sync with `SnapshotKind` in app/lib/backup.server.ts)
+  kind String
+
+  /// The day (YYYY-MM-DD in the app's time zone) an AUTO snapshot was taken
+  /// for; null for every other kind. Unique per user, so two requests racing
+  /// to take the same day's backup can't both write one.
+  autoDay String?
+
+  /// gzip-compressed backup JSON.
+  data      Bytes
+  /// Uncompressed size of `data`, for display.
+  sizeBytes Int
+  /// Row counts per table, so the list can describe a snapshot without
+  /// decompressing it.
+  summary   Json
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, autoDay])
+  @@index([userId, kind, createdAt])
 }

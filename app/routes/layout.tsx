@@ -1,9 +1,28 @@
 import { useState, useEffect } from "react";
 import { Outlet, useLoaderData, useMatches } from "react-router";
 import type { Route } from "./+types/layout";
-import { requireUser } from "../lib/auth.server";
+import { getSession, requireUser } from "../lib/auth.server";
+import { ensureDailyBackup } from "../lib/backup.server";
 import { Sidebar } from "../components/Sidebar";
 import { Header } from "../components/Header";
+
+/**
+ * Takes the day's automatic backup before anything else in the request runs.
+ * Middleware rather than the loader because it also runs ahead of actions, so
+ * the snapshot is taken before today's first change even when that change is
+ * a form submitted from a tab left open overnight.
+ *
+ * Reads the signed cookie only; requireUser in the loaders still decides
+ * whether the request is allowed. A no-op after the first request of the day.
+ */
+export const middleware: Route.MiddlewareFunction[] = [
+  async ({ request }, next) => {
+    const session = await getSession(request);
+    const userId = session.get("userId");
+    if (typeof userId === "string") await ensureDailyBackup(userId);
+    return next();
+  },
+];
 
 export async function loader({ request }: Route.LoaderArgs) {
   // One query instead of two: requireUserId used to re-fetch the user that

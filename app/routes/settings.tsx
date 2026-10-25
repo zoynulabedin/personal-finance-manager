@@ -3,6 +3,7 @@ import {
   Form,
   useLoaderData,
   useActionData,
+  useNavigation,
   useOutletContext,
   redirect,
 } from "react-router";
@@ -15,23 +16,44 @@ import {
   getSession,
   sessionStorage,
 } from "../lib/auth.server";
+import { parseText } from "../lib/validation.server";
 import {
-  parseAmount,
-  parseBalance,
-  parseIntParam,
-  parsePaymentMethod,
-  parseText,
-  roundMoney,
-} from "../lib/validation.server";
-import { postLedgerEntry } from "../lib/ledger.server";
-import { isDonationCategory } from "../lib/donation-balance.server";
+  backupDayKey,
+  createManualSnapshot,
+  deleteSnapshot,
+  listSnapshots,
+  restoreBackup,
+  restoreSnapshot,
+  type RestoreCounts,
+  type SnapshotKind,
+  type SnapshotListItem,
+} from "../lib/backup.server";
+import { toBengaliDigits } from "../utils/bengali";
 import type { LayoutContextType } from "./layout";
-import { Settings, User, Lock, Download, Upload } from "lucide-react";
+import {
+  Settings,
+  User,
+  Lock,
+  Download,
+  Upload,
+  DatabaseBackup,
+  ArchiveRestore,
+  Trash2,
+  CircleCheck,
+  TriangleAlert,
+} from "lucide-react";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const user = await requireUser(request);
   const url = new URL(request.url);
-  return { user, passwordChanged: url.searchParams.get("passwordChanged") === "1" };
+  const snapshots = await listSnapshots(user.id);
+  const today = backupDayKey();
+  return {
+    user,
+    passwordChanged: url.searchParams.get("passwordChanged") === "1",
+    snapshots,
+    todaySnapshot: snapshots.find((s) => s.autoDay === today) ?? null,
+  };
 }
 
 const MIN_PASSWORD_LENGTH = 8;
@@ -47,11 +69,12 @@ type SettingsActionData = {
   passSuccess?: string;
   backupError?: string;
   backupSuccess?: string;
+  snapshotError?: string;
+  snapshotSuccess?: string;
 };
 
-/** Shapes we accept from a backup file, validated before anything is written. */
-function asArray(value: unknown): any[] {
-  return Array.isArray(value) ? value : [];
+function describeRestore(counts: RestoreCounts): string {
+  return `${counts.categories}টি ক্যাটাগরি, ${counts.banks}টি একাউন্ট, ${counts.incomes}টি আয়, ${counts.expenses}টি খরচ, ${counts.bills}টি বিল, ${counts.transfers}টি ট্রান্সফার`;
 }
 
 export async function action({
@@ -171,394 +194,8 @@ export async function action({
     }
 
     try {
-      const counts = await prisma.$transaction(async (tx) => {
-        if (replaceExisting) {
-          // Scoped to this user only. Expenses first (they reference
-          // categories and bank accounts), then donations via income cascade.
-          await tx.ledgerEntry.deleteMany({ where: { userId } });
-          await tx.transfer.deleteMany({ where: { userId } });
-          await tx.bill.deleteMany({ where: { userId } });
-          await tx.expense.deleteMany({ where: { userId } });
-          await tx.income.deleteMany({ where: { userId } });
-          await tx.bankAccount.deleteMany({ where: { userId } });
-          await tx.category.deleteMany({ where: { userId } });
-          // The donation tracker is a cache over rows that no longer exist.
-          // It is rebuilt from the restored data at the end of this import.
-          await tx.donationBalance.deleteMany({ where: { userId } });
-        }
-
-        /**
-         * Ids from the file are never reused. The old code upserted on the
-         * incoming id, which meant a crafted backup could overwrite another
-         * user's rows and reassign them to the importer. Fresh rows are
-         * created instead and old ids are remapped through these tables.
-         */
-        const categoryIdMap = new Map<string, string>();
-        const bankIdMap = new Map<string, string>();
-        const incomeIdMap = new Map<string, string>();
-        const expenseIdMap = new Map<string, string>();
-        const donationIdMap = new Map<string, string>();
-        const transferIdMap = new Map<string, string>();
-        // A reversal entry points at the original it undid. Restoring that
-        // link matters: `reverseLedgerFor` treats an entry with no
-        // `reversalOfId` as an original, so a reversal imported without it
-        // gets reversed a second time on the next edit and money vanishes.
-        const ledgerIdMap = new Map<string, string>();
-
-        // The donation tracker is rebuilt from the rows actually restored,
-        // rather than trusting a figure in the file that may not match them.
-        const donationCategoryIds = new Set<string>();
-        let allocatedTotal = 0;
-        let spentTotal = 0;
-
-        for (const cat of asArray(parsed.categories)) {
-          const name = parseText(cat?.name);
-          if (!name) continue;
-          const created = await tx.category.create({
-            data: {
-              userId,
-              name,
-              icon: typeof cat.icon === "string" ? cat.icon : null,
-              color: typeof cat.color === "string" ? cat.color : null,
-              type: typeof cat.type === "string" ? cat.type : "EXPENSE",
-            },
-          });
-          if (typeof cat.id === "string") categoryIdMap.set(cat.id, created.id);
-          if (isDonationCategory(created)) donationCategoryIds.add(created.id);
-        }
-
-        for (const bank of asArray(parsed.bankAccounts)) {
-          const bankName = parseText(bank?.bankName);
-          const accountName = parseText(bank?.accountName);
-          if (!bankName || !accountName) continue;
-          const created = await tx.bankAccount.create({
-            data: {
-              userId,
-              bankName,
-              accountName,
-              accountNumber: parseText(bank?.accountNumber) ?? "N/A",
-              // Starts empty — the ledger entries below (or a synthetic
-              // opening entry) put the money back, so the restored balance is
-              // always the sum of its history rather than a bare number.
-              currentBalance: 0,
-              isCash:
-                typeof bank.isCash === "boolean"
-                  ? bank.isCash
-                  : bankName.toLowerCase() === "cash",
-              note: parseText(bank?.note),
-            },
-          });
-          if (typeof bank.id === "string") bankIdMap.set(bank.id, created.id);
-        }
-
-        let incomeCount = 0;
-        for (const inc of asArray(parsed.incomes)) {
-          const title = parseText(inc?.title);
-          const amount = parseAmount(inc?.amount);
-          const month = parseIntParam(String(inc?.month), {
-            min: 1,
-            max: 12,
-            fallback: 0,
-          });
-          const year = parseIntParam(String(inc?.year), {
-            min: 1970,
-            max: 9999,
-            fallback: 0,
-          });
-          if (!title || amount === null || month === 0 || year === 0) continue;
-
-          const createdIncome = await tx.income.create({
-            data: {
-              userId,
-              title,
-              amount,
-              month,
-              year,
-              note: parseText(inc?.note),
-              bankAccountId:
-                typeof inc?.bankAccountId === "string"
-                  ? bankIdMap.get(inc.bankAccountId) ?? null
-                  : null,
-              receivedAt: inc?.receivedAt ? new Date(inc.receivedAt) : undefined,
-            },
-          });
-          incomeCount += 1;
-          if (typeof inc.id === "string") incomeIdMap.set(inc.id, createdIncome.id);
-
-          // Donations were exported but never restored by the old importer,
-          // so every export/restore round trip silently lost them.
-          const donations = asArray(inc?.donations);
-          if (donations.length > 0) {
-            for (const don of donations) {
-              const donAmount = parseAmount(don?.amount);
-              if (donAmount === null) continue;
-              const mappedBank =
-                typeof don?.bankAccountId === "string"
-                  ? bankIdMap.get(don.bankAccountId) ?? null
-                  : null;
-              const createdDonation = await tx.donation.create({
-                data: {
-                  incomeId: createdIncome.id,
-                  percentage:
-                    typeof don?.percentage === "number" &&
-                    Number.isFinite(don.percentage)
-                      ? don.percentage
-                      : 1.0,
-                  amount: donAmount,
-                  paid: don?.paid === true,
-                  paidDate: don?.paidDate ? new Date(don.paidDate) : null,
-                  bankAccountId: mappedBank,
-                },
-              });
-              if (typeof don?.id === "string") {
-                donationIdMap.set(don.id, createdDonation.id);
-              }
-              allocatedTotal += createdDonation.amount;
-              if (createdDonation.paid) spentTotal += createdDonation.amount;
-            }
-          } else {
-            // Older backups have no donations array — regenerate the 1% row.
-            const regenerated = roundMoney(amount * 0.01);
-            await tx.donation.create({
-              data: {
-                incomeId: createdIncome.id,
-                percentage: 1.0,
-                amount: regenerated,
-                paid: false,
-              },
-            });
-            allocatedTotal += regenerated;
-          }
-        }
-
-        let expenseCount = 0;
-        for (const exp of asArray(parsed.expenses)) {
-          const title = parseText(exp?.title);
-          const amount = parseAmount(exp?.amount);
-          const date = exp?.date ? new Date(exp.date) : null;
-          const mappedCategory =
-            typeof exp?.categoryId === "string"
-              ? categoryIdMap.get(exp.categoryId)
-              : undefined;
-
-          // Without a category the row can't be created at all — skip it
-          // rather than aborting the whole import with an FK error.
-          if (!title || amount === null || !mappedCategory) continue;
-          if (!date || Number.isNaN(date.getTime())) continue;
-
-          const createdExpense = await tx.expense.create({
-            data: {
-              userId,
-              title,
-              amount,
-              date,
-              categoryId: mappedCategory,
-              paymentMethod: parsePaymentMethod(exp?.paymentMethod),
-              bankAccountId:
-                typeof exp?.bankAccountId === "string"
-                  ? bankIdMap.get(exp.bankAccountId) ?? null
-                  : null,
-              note: parseText(exp?.note),
-            },
-          });
-          expenseCount += 1;
-          if (typeof exp.id === "string") expenseIdMap.set(exp.id, createdExpense.id);
-          if (donationCategoryIds.has(mappedCategory)) {
-            spentTotal += createdExpense.amount;
-          }
-        }
-
-        let billCount = 0;
-        for (const bill of asArray(parsed.bills)) {
-          const title = parseText(bill?.title);
-          const amount = parseAmount(bill?.amount);
-          const dueDate = bill?.dueDate ? new Date(bill.dueDate) : null;
-          if (!title || amount === null) continue;
-          if (!dueDate || Number.isNaN(dueDate.getTime())) continue;
-
-          // Without the expense link a restored paid bill can't be unpaid:
-          // `unpay_bill` would flip the flag but leave the expense and its
-          // ledger debit in place, and the bill could then be paid a second
-          // time. The expense loop above has already run, so the id maps.
-          const linkedExpenseId =
-            typeof bill?.expenseId === "string"
-              ? expenseIdMap.get(bill.expenseId) ?? null
-              : null;
-
-          await tx.bill.create({
-            data: {
-              userId,
-              title,
-              amount,
-              dueDate,
-              paid: bill?.paid === true,
-              paidDate: bill?.paidDate ? new Date(bill.paidDate) : null,
-              note: parseText(bill?.note),
-              expenseId: linkedExpenseId,
-            },
-          });
-          billCount += 1;
-        }
-
-        // Transfers were exported by neither the old backup nor restored by
-        // the old importer, so every round trip lost them — and the ledger
-        // entries they produced were left pointing at nothing, which made them
-        // impossible to reverse.
-        let transferCount = 0;
-        for (const tr of asArray(parsed.transfers)) {
-          const fromAccountId =
-            typeof tr?.fromAccountId === "string"
-              ? bankIdMap.get(tr.fromAccountId)
-              : undefined;
-          const toAccountId =
-            typeof tr?.toAccountId === "string"
-              ? bankIdMap.get(tr.toAccountId)
-              : undefined;
-          const trAmount = parseAmount(tr?.amount);
-          if (!fromAccountId || !toAccountId || trAmount === null) continue;
-          if (fromAccountId === toAccountId) continue;
-
-          const createdTransfer = await tx.transfer.create({
-            data: {
-              userId,
-              fromAccountId,
-              toAccountId,
-              amount: trAmount,
-              note: parseText(tr?.note),
-              occurredAt: tr?.occurredAt ? new Date(tr.occurredAt) : undefined,
-            },
-          });
-          transferCount += 1;
-          if (typeof tr?.id === "string") {
-            transferIdMap.set(tr.id, createdTransfer.id);
-          }
-        }
-
-        const ledgerRows = asArray(parsed.ledgerEntries);
-
-        if (ledgerRows.length > 0) {
-          // Originals before reversals, so `reversalOfId` can be remapped as
-          // we go. The export is ordered by occurredAt, and a reversal always
-          // occurs at or after its original, but sorting explicitly means the
-          // import doesn't depend on that.
-          const orderedRows = [...ledgerRows].sort((a, b) => {
-            const aIsReversal = typeof a?.reversalOfId === "string" ? 1 : 0;
-            const bIsReversal = typeof b?.reversalOfId === "string" ? 1 : 0;
-            return aIsReversal - bIsReversal;
-          });
-
-          for (const entry of orderedRows) {
-            const bankAccountId =
-              typeof entry?.bankAccountId === "string"
-                ? bankIdMap.get(entry.bankAccountId)
-                : undefined;
-            const entryAmount = parseBalance(entry?.amount);
-            if (!bankAccountId || entryAmount === null || entryAmount === 0) {
-              continue;
-            }
-
-            // Goes through the ledger rather than writing `currentBalance`
-            // directly, so the one place that is allowed to move a balance
-            // stays the only place that does.
-            const created = await postLedgerEntry(tx, {
-              userId,
-              bankAccountId,
-              amount: entryAmount,
-              type: typeof entry.type === "string" ? entry.type : "ADJUSTMENT",
-              description:
-                parseText(entry?.description) ?? "পুনরুদ্ধারকৃত এন্ট্রি",
-              occurredAt: entry?.occurredAt
-                ? new Date(entry.occurredAt)
-                : new Date(),
-              source: {
-                incomeId:
-                  typeof entry?.incomeId === "string"
-                    ? incomeIdMap.get(entry.incomeId) ?? null
-                    : null,
-                expenseId:
-                  typeof entry?.expenseId === "string"
-                    ? expenseIdMap.get(entry.expenseId) ?? null
-                    : null,
-                donationId:
-                  typeof entry?.donationId === "string"
-                    ? donationIdMap.get(entry.donationId) ?? null
-                    : null,
-                transferId:
-                  typeof entry?.transferId === "string"
-                    ? transferIdMap.get(entry.transferId) ?? null
-                    : null,
-              },
-              reversalOfId:
-                typeof entry?.reversalOfId === "string"
-                  ? ledgerIdMap.get(entry.reversalOfId) ?? null
-                  : null,
-            });
-
-            if (created) {
-              if (typeof entry?.id === "string") {
-                ledgerIdMap.set(entry.id, created.id);
-              }
-              // `postLedgerEntry` never sets this — a reversal is posted
-              // against a live entry, so the flag is applied afterwards.
-              if (entry?.reversedAt) {
-                await tx.ledgerEntry.update({
-                  where: { id: created.id },
-                  data: { reversedAt: new Date(entry.reversedAt) },
-                });
-              }
-            }
-          }
-        } else {
-          // Backups written before the ledger existed only carry a closing
-          // balance. Restore it as an opening entry so the statement still
-          // adds up to the right figure.
-          for (const bank of asArray(parsed.bankAccounts)) {
-            const mapped =
-              typeof bank?.id === "string" ? bankIdMap.get(bank.id) : undefined;
-            const openingBalance = parseBalance(bank?.currentBalance);
-            if (!mapped || openingBalance === null || openingBalance === 0) {
-              continue;
-            }
-            await postLedgerEntry(tx, {
-              userId,
-              bankAccountId: mapped,
-              amount: openingBalance,
-              type: "OPENING",
-              description: "ব্যাকআপ থেকে পুনরুদ্ধারকৃত ব্যালেন্স",
-            });
-          }
-        }
-
-        // Rebuilt from the rows actually restored. Incremented rather than
-        // assigned, because a restore without "replace existing" adds to what
-        // is already there — and when it does replace, the row was deleted
-        // above so the increment starts from zero either way.
-        allocatedTotal = roundMoney(allocatedTotal);
-        spentTotal = roundMoney(spentTotal);
-        if (allocatedTotal > 0 || spentTotal > 0) {
-          await tx.donationBalance.upsert({
-            where: { userId },
-            create: { userId, allocated: allocatedTotal, spent: spentTotal },
-            update: {
-              allocated: { increment: allocatedTotal },
-              spent: { increment: spentTotal },
-            },
-          });
-        }
-
-        return {
-          categories: categoryIdMap.size,
-          banks: bankIdMap.size,
-          incomes: incomeCount,
-          expenses: expenseCount,
-          bills: billCount,
-          transfers: transferCount,
-        };
-      });
-
-      return {
-        backupSuccess: `ডেটা সফলভাবে রিস্টোর হয়েছে — ${counts.categories}টি ক্যাটাগরি, ${counts.banks}টি একাউন্ট, ${counts.incomes}টি আয়, ${counts.expenses}টি খরচ, ${counts.bills}টি বিল, ${counts.transfers}টি ট্রান্সফার।`,
-      };
+      const counts = await restoreBackup(userId, parsed, { replaceExisting });
+      return { backupSuccess: `ডেটা সফলভাবে রিস্টোর হয়েছে — ${describeRestore(counts)}।` };
     } catch (error) {
       console.error("Backup import failed:", error);
       return {
@@ -568,12 +205,244 @@ export async function action({
     }
   }
 
+  if (intent === "create_snapshot") {
+    try {
+      await createManualSnapshot(userId);
+      return { snapshotSuccess: "বর্তমান সব ডেটার ব্যাকআপ নেওয়া হয়েছে।" };
+    } catch (error) {
+      console.error("Manual backup failed:", error);
+      return { snapshotError: "ব্যাকআপ নেওয়া সম্ভব হয়নি। আবার চেষ্টা করুন।" };
+    }
+  }
+
+  if (intent === "restore_snapshot") {
+    const snapshotId = parseText(formData.get("snapshotId"));
+    if (!snapshotId) return { snapshotError: "কোনো ব্যাকআপ নির্বাচন করা হয়নি।" };
+
+    try {
+      const counts = await restoreSnapshot(userId, snapshotId);
+      if (!counts) return { snapshotError: "ব্যাকআপটি পাওয়া যায়নি।" };
+      return {
+        snapshotSuccess: `ব্যাকআপ থেকে ডেটা ফিরিয়ে আনা হয়েছে — ${describeRestore(counts)}। আগের অবস্থার একটি ব্যাকআপ "রিস্টোরের আগে" নামে রাখা হয়েছে।`,
+      };
+    } catch (error) {
+      console.error("Snapshot restore failed:", error);
+      return {
+        snapshotError:
+          "রিস্টোর করা যায়নি। কোনো পরিবর্তন সংরক্ষণ হয়নি — আপনার বর্তমান ডেটা অপরিবর্তিত আছে।",
+      };
+    }
+  }
+
+  if (intent === "delete_snapshot") {
+    const snapshotId = parseText(formData.get("snapshotId"));
+    if (!snapshotId || !(await deleteSnapshot(userId, snapshotId))) {
+      return { snapshotError: "ব্যাকআপটি পাওয়া যায়নি।" };
+    }
+    return { snapshotSuccess: "ব্যাকআপটি মুছে ফেলা হয়েছে।" };
+  }
+
   return null;
+}
+
+const SNAPSHOT_KINDS: Record<SnapshotKind, { label: string; className: string }> = {
+  AUTO: {
+    label: "দৈনিক",
+    className: "bg-sky-500/10 border-sky-500/20 text-sky-400",
+  },
+  MANUAL: {
+    label: "ম্যানুয়াল",
+    className: "bg-emerald-500/10 border-emerald-500/20 text-emerald-400",
+  },
+  PRE_RESTORE: {
+    label: "রিস্টোরের আগে",
+    className: "bg-amber-500/10 border-amber-500/20 text-amber-400",
+  },
+};
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function BackupSnapshotsCard({
+  snapshots,
+  todaySnapshot,
+  actionData,
+  useBengaliDigits,
+}: {
+  snapshots: SnapshotListItem[];
+  todaySnapshot: SnapshotListItem | null;
+  actionData: SettingsActionData | undefined;
+  useBengaliDigits: boolean;
+}) {
+  const navigation = useNavigation();
+  const busyIntent =
+    navigation.state === "submitting"
+      ? navigation.formData?.get("_intent")?.toString()
+      : undefined;
+  const busy =
+    busyIntent === "create_snapshot" ||
+    busyIntent === "restore_snapshot" ||
+    busyIntent === "delete_snapshot";
+
+  const digits = (value: string | number) =>
+    useBengaliDigits ? toBengaliDigits(value) : String(value);
+
+  return (
+    <div className="glass-card p-6 rounded-2xl border border-slate-800 space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+        <h3 className="font-bold text-slate-100 text-base flex items-center gap-2">
+          <DatabaseBackup className="w-5 h-5 text-sky-400" />
+          <span>স্বয়ংক্রিয় দৈনিক ব্যাকআপ (Daily Backups)</span>
+        </h3>
+        <Form method="post">
+          <input type="hidden" name="_intent" value="create_snapshot" />
+          <button
+            type="submit"
+            disabled={busy}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold text-xs shadow-md transition"
+          >
+            <DatabaseBackup className="w-4 h-4" />
+            <span>
+              {busyIntent === "create_snapshot" ? "ব্যাকআপ নেওয়া হচ্ছে…" : "এখনই ব্যাকআপ নিন"}
+            </span>
+          </button>
+        </Form>
+      </div>
+
+      <p className="text-xs text-slate-400">
+        প্রতিদিন প্রথমবার অ্যাপ ব্যবহারের সময়, কোনো পরিবর্তনের আগেই, আপনার সব
+        ডেটার একটি ব্যাকআপ স্বয়ংক্রিয়ভাবে সংরক্ষিত হয়। শেষ {digits(30)}টি দৈনিক
+        ব্যাকআপ রাখা হয়। যেকোনো রিস্টোরের আগে বর্তমান ডেটার একটি ব্যাকআপও রাখা
+        হয়, তাই ভুল রিস্টোরও ফিরিয়ে নেওয়া যায়।
+      </p>
+
+      {todaySnapshot ? (
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
+          <CircleCheck className="w-4 h-4 shrink-0" />
+          <span>
+            আজকের ব্যাকআপ নেওয়া হয়েছে — {digits(todaySnapshot.createdAtLabel)}
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+          <TriangleAlert className="w-4 h-4 shrink-0" />
+          <span>
+            আজকের স্বয়ংক্রিয় ব্যাকআপ নেওয়া যায়নি। "এখনই ব্যাকআপ নিন" চাপুন, অথবা
+            কিছুক্ষণ পর পাতাটি আবার খুলুন।
+          </span>
+        </div>
+      )}
+
+      {actionData?.snapshotError && (
+        <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+          {actionData.snapshotError}
+        </div>
+      )}
+      {actionData?.snapshotSuccess && (
+        <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
+          {actionData.snapshotSuccess}
+        </div>
+      )}
+
+      {snapshots.length === 0 ? (
+        <p className="text-xs text-slate-500 text-center py-6">
+          এখনো কোনো ব্যাকআপ নেই।
+        </p>
+      ) : (
+        <ul className="divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-900">
+          {snapshots.map((snapshot) => {
+            const kind = SNAPSHOT_KINDS[snapshot.kind] ?? SNAPSHOT_KINDS.MANUAL;
+            const { summary } = snapshot;
+            return (
+              <li
+                key={snapshot.id}
+                className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3"
+              >
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`px-2 py-0.5 rounded-lg border text-[11px] font-semibold ${kind.className}`}
+                    >
+                      {kind.label}
+                    </span>
+                    <span className="text-sm font-semibold text-slate-200">
+                      {digits(snapshot.createdAtLabel)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {digits(summary.incomes)}টি আয় · {digits(summary.expenses)}টি খরচ ·{" "}
+                    {digits(summary.bills)}টি বিল · {digits(summary.bankAccounts)}টি একাউন্ট ·{" "}
+                    {digits(formatSize(snapshot.sizeBytes))}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={`/settings/backups/${snapshot.id}/download`}
+                    download
+                    title="ডাউনলোড"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>ডাউনলোড</span>
+                  </a>
+
+                  <Form
+                    method="post"
+                    onSubmit={(e) =>
+                      !confirm(
+                        "এই ব্যাকআপে ফিরে যেতে চান?\n\nবর্তমান সব ডেটা মুছে এই ব্যাকআপের ডেটা বসানো হবে। তার আগে বর্তমান অবস্থার একটি ব্যাকআপ স্বয়ংক্রিয়ভাবে রাখা হবে।"
+                      ) && e.preventDefault()
+                    }
+                  >
+                    <input type="hidden" name="_intent" value="restore_snapshot" />
+                    <input type="hidden" name="snapshotId" value={snapshot.id} />
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold text-xs transition"
+                    >
+                      <ArchiveRestore className="w-3.5 h-3.5" />
+                      <span>
+                        {busyIntent === "restore_snapshot" &&
+                        navigation.formData?.get("snapshotId") === snapshot.id
+                          ? "রিস্টোর হচ্ছে…"
+                          : "রিস্টোর"}
+                      </span>
+                    </button>
+                  </Form>
+
+                  <Form
+                    method="post"
+                    onSubmit={(e) => !confirm("মুছে ফেলতে চান?") && e.preventDefault()}
+                  >
+                    <input type="hidden" name="_intent" value="delete_snapshot" />
+                    <input type="hidden" name="snapshotId" value={snapshot.id} />
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      title="মুছে ফেলুন"
+                      className="p-2 rounded-xl text-slate-500 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </Form>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export default function SettingsPage() {
   const { useBengaliDigits, setUseBengaliDigits } = useOutletContext<LayoutContextType>();
-  const { user, passwordChanged } = useLoaderData<typeof loader>();
+  const { user, passwordChanged, snapshots, todaySnapshot } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData() as SettingsActionData | undefined;
 
   const [importJsonText, setImportJsonText] = useState("");
@@ -731,6 +600,13 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <BackupSnapshotsCard
+        snapshots={snapshots}
+        todaySnapshot={todaySnapshot}
+        actionData={actionData}
+        useBengaliDigits={useBengaliDigits}
+      />
+
       {/* Backup & Restore Section */}
       <div className="glass-card p-6 rounded-2xl border border-slate-800 space-y-6">
         <h3 className="font-bold text-slate-100 text-base flex items-center gap-2 border-b border-slate-800 pb-3">
@@ -803,7 +679,8 @@ export default function SettingsPage() {
                   ইম্পোর্টের আগে আমার বর্তমান সব ডেটা মুছে ফেলুন
                   <span className="block text-slate-500 mt-0.5">
                     টিক না দিলে ডেটা যুক্ত হবে (একই ব্যাকআপ দুইবার ইম্পোর্ট করলে
-                    ডুপ্লিকেট তৈরি হবে)।
+                    ডুপ্লিকেট তৈরি হবে)। ইম্পোর্টের আগে বর্তমান ডেটার একটি
+                    ব্যাকআপ স্বয়ংক্রিয়ভাবে রাখা হয়।
                   </span>
                 </span>
               </label>

@@ -17,5 +17,9 @@ export default [
     route("reports", "routes/reports.tsx"),
     route("settings", "routes/settings.tsx"),
     route("settings/export", "routes/settings-export.tsx"),
+    route(
+      "settings/backups/:backupId/download",
+      "routes/settings-backup-download.tsx"
+    ),
   ]),
 ] satisfies RouteConfig;
